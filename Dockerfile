@@ -13,4 +13,4 @@ COPY --from=build /app .
 # Render 環境設定
 ENV ASPNETCORE_URLS=http://+:80
 EXPOSE 80
-ENTRYPOINT ["dotnet", "zong0811.dll"]
+ENTRYPOINT ["dotnet", "linebot.dll"]
