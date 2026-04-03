@@ -1,0 +1,6 @@
+@zong0811_HostAddress = http://localhost:5292
+
+GET {{zong0811_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "dgSpecHash": "3ufjI7uBrx0=",
+  "success": true,
+  "projectFilePath": "/workspaces/zong0811/zong0811.csproj",
+  "expectedPackageFiles": [
+    "/home/codespace/.nuget/packages/linebotsdk/2.18.45/linebotsdk.2.18.45.nupkg.sha512",
+    "/home/codespace/.nuget/packages/microsoft.aspnetcore.openapi/10.0.0/microsoft.aspnetcore.openapi.10.0.0.nupkg.sha512",
+    "/home/codespace/.nuget/packages/microsoft.openapi/2.0.0/microsoft.openapi.2.0.0.nupkg.sha512",
+    "/home/codespace/.nuget/packages/newtonsoft.json/13.0.1/newtonsoft.json.13.0.1.nupkg.sha512"
+  ],
+  "logs": []
+}
