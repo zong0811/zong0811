@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Linq;
@@ -87,7 +87,7 @@ namespace isRock.Template
         }
     }
 
-    // --- 4. Gemini 服務 (動態按鈕提示工程) ---
+    // --- 4. Gemini 服務 (強化提示詞指令) ---
     public static class GeminiLLM
     {
         private static string ApiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
@@ -106,9 +106,9 @@ namespace isRock.Template
                 contents = ChatHistoryManager.GetHistory(userId),
                 systemInstruction = new { 
                     parts = new[] { new { 
-                        text = $"你是一位資深教育導師。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣與家長對話。" +
-                               "請在回覆的最末端，固定使用一個 '|' 符號隔開，隨後提供 3 個適合家長繼續追問的短選項（每個選項 10 字以內），用逗號隔開。" +
-                               "範例格式：[你的導師回覆內容] | 建議問題一, 建議問題二, 建議問題三"
+                        text = $"你是一位資深的教育人員。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣與家長對話。" +
+                               "【重要強制指令】：在你的回答結束後，必須先換行，然後輸入一個管道符號 '|'，接著提供 3 個建議追問的短標題（每個 10 字以內），用逗號隔開。" +
+                               "回覆範例：親愛的家長...回覆內容 \n| 建立睡前儀式, 晨間節奏調整, 適合的小故事"
                     } } 
                 },
                 generationConfig = new { maxOutputTokens = 1000, temperature = 0.7 }
@@ -121,28 +121,23 @@ namespace isRock.Template
                 var response = await client.PostAsync(url, content);
                 var jsonResponse = await response.Content.ReadAsStringAsync();
 
-                if (!response.IsSuccessStatusCode) return ("AI連線失敗，請稍後再試。", 0);
+                if (!response.IsSuccessStatusCode) return ("AI正在連線中，請稍後再試。", 0);
 
                 dynamic? result = JsonConvert.DeserializeObject(jsonResponse);
-                string textResult = result?.candidates?[0]?.content?.parts?[0]?.text ?? "目前暫時無法回覆。";
+                string textResult = result?.candidates?[0]?.content?.parts?[0]?.text ?? "我看見了光。";
                 int totalTokens = result?.usageMetadata?.totalTokenCount ?? 0;
 
                 SearchCacheManager.SetCache(userQuery, textResult);
                 return (textResult, totalTokens);
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($">>> [Gemini 異常]: {ex.Message}");
-                return ("AI暫時斷線。", 0);
-            }
+            catch (Exception ex) { return ("AI暫時切斷了聯繫。", 0); }
         }
     }
 
-    // --- 5. LINE WebHook 控制器 (動態解析與發送) ---
+    // --- 5. LINE WebHook 控制器 (修正按鈕發送邏輯) ---
     public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
     {
-        [HttpHead] [HttpGet]
-        [Route("api/LineBotOpenAIWebHook")]
+        [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
         public IActionResult Get() => Ok("Bot is Alive!");
 
         [Route("api/LineBotOpenAIWebHook")]
@@ -161,9 +156,8 @@ namespace isRock.Template
                     string userText = lineEvent.message.text;
 
                     int currentCount = UsageManager.GetAndIncrementCount(out bool isOverLimit);
-                    if (isOverLimit) 
-                    {
-                        this.ReplyMessage(lineEvent.replyToken, "🌟 今日使用次數已達上限。");
+                    if (isOverLimit) {
+                        this.ReplyMessage(lineEvent.replyToken, "🌟 今日配額已滿。");
                         return Ok();
                     }
 
@@ -171,40 +165,46 @@ namespace isRock.Template
                     var (rawResponse, totalTokens) = await GeminiLLM.GetResponseAsync(userId, userText);
                     ChatHistoryManager.AddMessage(userId, "assistant", rawResponse);
 
-                    // --- v1.2 核心邏輯：動態解析按鈕 ---
+                    // --- 解析邏輯 ---
                     string displayMsg = rawResponse;
-                    var quickReplyButtons = new List<isRock.LineBot.QuickReplyItem>();
+                    var quickReplyItems = new List<isRock.LineBot.QuickReplyItem>();
 
                     if (rawResponse.Contains("|"))
                     {
                         var parts = rawResponse.Split('|');
-                        displayMsg = parts[0].Trim(); // 前半部是回覆內容
-                        var suggestions = parts[1].Split(','); // 後半部是追問建議
+                        displayMsg = parts[0].Trim(); 
+                        var suggestions = parts[1].Split(',');
 
                         foreach (var suggestion in suggestions)
                         {
                             if (!string.IsNullOrWhiteSpace(suggestion))
-                                quickReplyButtons.Add(new isRock.LineBot.QuickReplyTextAction(suggestion.Trim(), suggestion.Trim()));
+                                quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction(suggestion.Trim(), suggestion.Trim()));
                         }
                     }
 
-                    // 如果 AI 沒給建議，加入預設溫馨按鈕
-                    if (quickReplyButtons.Count == 0)
+                    // 備援：若 AI 沒給建議，強制加入預設按鈕
+                    if (quickReplyItems.Count == 0)
                     {
-                        quickReplyButtons.Add(new isRock.LineBot.QuickReplyTextAction("請再多說一點", "請導師針對剛才的主題再多分享一些，謝謝。"));
-                        quickReplyButtons.Add(new isRock.LineBot.QuickReplyTextAction("適合的家庭活動", "請問導師針對這個話題，有什麼適合在家與孩子一起做的活動嗎？"));
+                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("請再多說一點", "請導師再多跟我分享一些，謝謝。"));
+                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("對孩子的幫助？", "這對孩子的成長有什麼幫助呢？"));
+                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("居家活動建議", "有什麼適合在家做的活動嗎？"));
                     }
 
-                    string tokenInfo = totalTokens > 0 ? $"消耗：{totalTokens} tokens" : "（來自快取）";
-                    string finalReply = $"{displayMsg}\n\n次數：{currentCount}/500 | {tokenInfo}";
+                    string tokenInfo = totalTokens > 0 ? $"總計消耗：{totalTokens} tokens" : "（來自快取）";
+                    string finalText = $"{displayMsg}\n\n次數：{currentCount}/500\n{tokenInfo}";
 
-                    this.ReplyMessage(lineEvent.replyToken, finalReply, quickReplyButtons);
+                    // --- 重要修正：確保使用正確的 SDK 物件發送按鈕 ---
+                    var replyMsg = new isRock.LineBot.TextMessage(finalText);
+                    replyMsg.quickReply.items.AddRange(quickReplyItems);
+
+                    // 使用 ReplyMessage 發送 Message 物件
+                    this.ReplyMessage(lineEvent.replyToken, replyMsg);
                 }
                 return Ok();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"======= [WebHook 崩潰] =======\n{ex}");
+                Console.WriteLine(ex.ToString());
                 return Ok();
             }
         }
