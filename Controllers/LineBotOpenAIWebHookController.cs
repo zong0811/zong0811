@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Net.Http;
-using System.Net.Http.Headers; // 修正：確保 AuthenticationHeaderValue 可用
+using System.Net.Http.Headers;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
@@ -35,7 +35,7 @@ namespace isRock.Template
         }
     }
 
-    // --- 2. 對話歷史管理員 (記憶 5 輪以提升精準度) ---
+    // --- 2. 對話歷史管理員 (5 輪) ---
     public static class ChatHistoryManager
     {
         private static readonly ConcurrentDictionary<string, List<object>> _history = new ConcurrentDictionary<string, List<object>>();
@@ -50,7 +50,7 @@ namespace isRock.Template
         }
     }
 
-    // --- 3. 搜尋快取管理員 (30 分鐘) ---
+    // --- 3. 搜尋快取管理員 ---
     public static class SearchCacheManager
     {
         private class CacheEntry { public string Result { get; set; } public DateTime ExpireTime { get; set; } }
@@ -67,7 +67,7 @@ namespace isRock.Template
         public static void SetCache(string query, string result) => _searchCache[query] = new CacheEntry { Result = result, ExpireTime = DateTime.Now.AddMinutes(30) };
     }
 
-    // --- 4. Gemini 服務 (強化按鈕指令) ---
+    // --- 4. Gemini 服務 ---
     public static class GeminiLLM
     {
         private static string ApiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
@@ -81,9 +81,9 @@ namespace isRock.Template
                 contents = ChatHistoryManager.GetHistory(userId),
                 systemInstruction = new { 
                     parts = new[] { new { 
-                        text = $"你是一位資深的教育人員。現在是台灣時間 {time}。請用溫柔而堅定的語氣對話。" +
-                               "【格式規範】：回覆結束後必須換行輸入 '|' 符號，隨後提供 3 個建議追問標題（每個 10 字內），用逗號隔開。" +
-                               "範例：這是建議內容... \n| 更短版本, 適合的小故事, 居家活動建議"
+                        text = $"你是一位資深教育顧問。現在是台灣時間 {time}。請用溫柔而堅定的語氣協助使用者。" +
+                               "【格式規範】：回覆結束後必須換行輸入一個 '|' 符號，隨後提供 3 個建議追問按鈕（每個 10 字內），用逗號隔開。" +
+                               "範例：這是我給你的建議... \n| 更短版本, 適合的小故事, 居家活動建議"
                     } } 
                 },
                 generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 }
@@ -92,7 +92,7 @@ namespace isRock.Template
             var content = new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json");
             var response = await client.PostAsync(url, content);
             var jsonResponse = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode) return ("導師正在沉思，請稍後再試。", 0);
+            if (!response.IsSuccessStatusCode) return ("導師正在沉思中...", 0);
             dynamic? result = JsonConvert.DeserializeObject(jsonResponse);
             string textResult = result?.candidates?[0]?.content?.parts?[0]?.text ?? "我看見了光。";
             int totalTokens = result?.usageMetadata?.totalTokenCount ?? 0;
@@ -101,10 +101,10 @@ namespace isRock.Template
         }
     }
 
-    // --- 5. LINE WebHook 控制器 (動畫 + 修正後的發送邏輯) ---
+    // --- 5. LINE WebHook 控制器 (修正型別衝突與 Null 警告) ---
     public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
     {
-        private string ChannelToken => Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
+        private string ChannelToken => Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN") ?? "";
 
         [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
         public IActionResult Get() => Ok("Bot is Alive!");
@@ -121,8 +121,8 @@ namespace isRock.Template
 
                 if (lineEvent.type.ToLower() == "message" && lineEvent.message.type == "text")
                 {
-                    string userId = lineEvent.source.userId;
-                    string userText = lineEvent.message.text;
+                    string userId = lineEvent.source.userId ?? "";
+                    string userText = lineEvent.message.text ?? "";
 
                     // A. 啟動動畫 (非阻塞)
                     _ = StartLoadingAnimation(userId, 5);
@@ -134,9 +134,11 @@ namespace isRock.Template
                     var (rawResponse, totalTokens) = await GeminiLLM.GetResponseAsync(userId, userText);
                     ChatHistoryManager.AddMessage(userId, "assistant", rawResponse);
 
-                    // B. 解析按鈕
+                    // B. 解析動態按鈕 (修正 CS0234 與 CS1503)
                     string displayMsg = rawResponse;
-                    var quickReplyItems = new List<isRock.LineBot.QuickReplyItem>();
+                    // 修正：明確使用 QuickReplyItemBase 清單以符合 SDK 要求
+                    var quickReplyItems = new List<isRock.LineBot.QuickReplyItemBase>();
+
                     if (rawResponse.Contains("|"))
                     {
                         var parts = rawResponse.Split('|');
@@ -144,27 +146,31 @@ namespace isRock.Template
                         var suggestions = parts[1].Split(new[] { ',', '，' });
                         foreach (var s in suggestions) {
                             if (!string.IsNullOrWhiteSpace(s) && quickReplyItems.Count < 5)
-                                quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction(s.Trim(), s.Trim()));
+                            {
+                                // 修正：改用 MessageAction
+                                var action = new isRock.LineBot.MessageAction(s.Trim(), s.Trim());
+                                quickReplyItems.Add(new isRock.LineBot.QuickReplyItem(action));
+                            }
                         }
                     }
 
                     // 備援按鈕
                     if (quickReplyItems.Count == 0) {
-                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("更短版本", "請給我更簡短的版本"));
-                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("三年級難度", "請調為國小三年級難度"));
-                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("做成學習單", "請幫我設計成學習單"));
+                        quickReplyItems.Add(new isRock.LineBot.QuickReplyItem(new isRock.LineBot.MessageAction("更短版本", "更短版本")));
+                        quickReplyItems.Add(new isRock.LineBot.QuickReplyItem(new isRock.LineBot.MessageAction("三年級難度", "三年級難度")));
+                        quickReplyItems.Add(new isRock.LineBot.QuickReplyItem(new isRock.LineBot.MessageAction("做成學習單", "做成學習單")));
                     }
 
                     string tokenInfo = totalTokens > 0 ? $"消耗：{totalTokens} tokens" : "（來自快取）";
                     string finalText = $"{displayMsg}\n\n次數：{currentCount}/500 | {tokenInfo}";
 
-                    // C. 修正：明確建立訊息清單，避免編譯歧義
+                    // C. 封裝 Message 物件並發送
                     var replyMsg = new isRock.LineBot.TextMessage(finalText);
+                    // 修正：確保 quickReply 物件已初始化並加入項目
+                    if (replyMsg.quickReply == null) replyMsg.quickReply = new isRock.LineBot.QuickReply();
                     replyMsg.quickReply.items.AddRange(quickReplyItems);
 
-                    // 使用明確的清單發送方式
-                    var msgs = new List<isRock.LineBot.MessageBase> { replyMsg };
-                    this.ReplyMessage(lineEvent.replyToken, msgs);
+                    this.ReplyMessage(lineEvent.replyToken, replyMsg);
                 }
                 return Ok();
             }
@@ -173,6 +179,7 @@ namespace isRock.Template
 
         private async Task StartLoadingAnimation(string userId, int seconds)
         {
+            if (string.IsNullOrEmpty(userId)) return;
             try {
                 using var client = new HttpClient();
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ChannelToken);
