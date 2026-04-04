@@ -126,50 +126,75 @@ namespace isRock.Template
         }
     }
 
-    // --- 5. LINE WebHook 控制器 (最精簡穩定版) ---
-    public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
-    {
-        [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
-        public IActionResult Get() => Ok("Bot is Alive!");
+    // ---5. 新增：動畫管理員 ---
+public static class LoadingAnimationManager
+{
+    public static async Task StartLoadingAsync(string accessToken, string userId, int seconds = 20)
+    {
+        if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(userId)) return;
 
-        [Route("api/LineBotOpenAIWebHook")]
-        [HttpPost]
-        public async Task<IActionResult> POST()
-        {
-            try
-            {
-                this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
-                var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
-                if (lineEvent == null || string.IsNullOrEmpty(lineEvent.replyToken)) return Ok();
+        string url = "https://api.line.me/v2/bot/chat/loading/start";
+        var requestBody = new { chatId = userId, loadingSeconds = seconds };
 
-                if (lineEvent.type.ToLower() == "message" && lineEvent.message.type == "text")
-                {
-                    string userId = lineEvent.source.userId;
-                    string userText = lineEvent.message.text;
+        try
+        {
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Add("Authorization", $"Bearer {accessToken}");
+            var content = new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json");
+            await client.PostAsync(url, content);
+        }
+        catch { /* 忽略動畫錯誤，確保不影響主流程 */ }
+    }
+}
 
-                    int currentCount = UsageManager.GetAndIncrementCount(out bool isOverLimit);
-                    if (isOverLimit) {
-                        this.ReplyMessage(lineEvent.replyToken, "🌟 今日配額已滿。");
-                        return Ok();
-                    }
+// --- 6.LINE WebHook 控制器更新 ---
+public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
+{
+    [Route("api/LineBotOpenAIWebHook")]
+    [HttpPost]
+    public async Task<IActionResult> POST()
+    {
+        try
+        {
+            this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
+            var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
+            if (lineEvent == null || string.IsNullOrEmpty(lineEvent.replyToken)) return Ok();
 
-                    ChatHistoryManager.AddMessage(userId, "user", userText);
-                    var (responseMsg, totalTokens) = await GeminiLLM.GetResponseAsync(userId, userText);
-                    ChatHistoryManager.AddMessage(userId, "assistant", responseMsg);
+            if (lineEvent.type.ToLower() == "message" && lineEvent.message.type == "text")
+            {
+                string userId = lineEvent.source.userId;
+                string userText = lineEvent.message.text;
 
-                    string tokenInfo = totalTokens > 0 ? $"總計消耗：{totalTokens} tokens" : "（來自快取）";
-                    string finalReply = $"{responseMsg}\n\n次數：{currentCount}/500\n{tokenInfo}";
+                // 1. 檢查配額
+                int currentCount = UsageManager.GetAndIncrementCount(out bool isOverLimit);
+                if (isOverLimit) {
+                    this.ReplyMessage(lineEvent.replyToken, "🌟 今日配額已滿。");
+                    return Ok();
+                }
 
-                    // 使用最基礎的字串回覆，出錯率最低
-                    this.ReplyMessage(lineEvent.replyToken, finalReply);
-                }
-                return Ok();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.ToString());
-                return Ok();
-            }
-        }
-    }
+                // 2. 啟動「動畫」 (這會讓使用者看到三個點在跳動)
+                // 注意：這是一個非同步呼叫，我們不使用 await 等它完，直接往下跑 Gemini
+                _ = LoadingAnimationManager.StartLoadingAsync(this.ChannelAccessToken, userId);
+
+                // 3. 處理對話歷史與呼叫 Gemini
+                ChatHistoryManager.AddMessage(userId, "user", userText);
+                var (responseMsg, totalTokens) = await GeminiLLM.GetResponseAsync(userId, userText);
+                ChatHistoryManager.AddMessage(userId, "assistant", responseMsg);
+
+                // 4. 組合最終訊息
+                string tokenInfo = totalTokens > 0 ? $"總計消耗：{totalTokens} tokens" : "（來自快取）";
+                string finalReply = $"{responseMsg}\n\n次數：{currentCount}/500\n{tokenInfo}";
+
+                // 5. 回覆訊息 (一旦回覆，LINE 會自動停止動畫)
+                this.ReplyMessage(lineEvent.replyToken, finalReply);
+            }
+            return Ok();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(ex.ToString());
+            return Ok();
+        }
+    }
+}
 }
