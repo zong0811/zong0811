@@ -32,6 +32,7 @@ namespace isRock.Template
                 {
                     _todayCount = 0;
                     _nextResetTime = GetNextResetTime();
+                    Console.WriteLine($">>> [系統狀態] 次數已重置。");
                 }
                 isOverLimit = _todayCount >= 500;
                 if (!isOverLimit) _todayCount++;
@@ -40,11 +41,11 @@ namespace isRock.Template
         }
     }
 
-    // --- 2. 對話歷史管理員 (縮減至 5 輪，確保指令執行精準度) ---
+    // --- 2. 對話歷史管理員 (記憶 10 輪) ---
     public static class ChatHistoryManager
     {
         private static readonly ConcurrentDictionary<string, List<object>> _history = new ConcurrentDictionary<string, List<object>>();
-        private const int MaxHistory = 5; 
+        private const int MaxHistory = 10; 
 
         public static List<object> GetHistory(string userId)
         {
@@ -68,6 +69,7 @@ namespace isRock.Template
             public DateTime ExpireTime { get; set; }
         }
         private static readonly ConcurrentDictionary<string, CacheEntry> _searchCache = new ConcurrentDictionary<string, CacheEntry>();
+        private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(30);
 
         public static bool TryGetCache(string query, out string result)
         {
@@ -81,11 +83,11 @@ namespace isRock.Template
 
         public static void SetCache(string query, string result)
         {
-            _searchCache[query] = new CacheEntry { Result = result, ExpireTime = DateTime.Now.AddMinutes(30) };
+            _searchCache[query] = new CacheEntry { Result = result, ExpireTime = DateTime.Now.Add(CacheDuration) };
         }
     }
 
-    // --- 4. Gemini 服務 (AI 建議按鈕指令強化) ---
+    // --- 4. Gemini 服務 (強化提示詞指令) ---
     public static class GeminiLLM
     {
         private static string ApiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
@@ -97,18 +99,19 @@ namespace isRock.Template
                 return (cachedResult, 0);
 
             string url = $"https://generativelanguage.googleapis.com/v1beta/models/{ModelName}:generateContent?key={ApiKey}";
-            string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy年MM月dd日 dddd HH:mm");
+            DateTime twNow = DateTime.UtcNow.AddHours(8);
+            string currentTimeInfo = twNow.ToString("yyyy年MM月dd日 dddd HH:mm");
 
             var requestBody = new {
                 contents = ChatHistoryManager.GetHistory(userId),
                 systemInstruction = new { 
                     parts = new[] { new { 
-                        text = $"你是一位資深的教育顧問。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣與老師對話。" +
-                               "【強制指令】：回覆結尾必須換行輸入一個 '|' 符號，隨後提供 3 個建議追問按鈕（每個 10 字內），用逗號隔開。" +
-                               "範例：[回覆內容] \n| 更短版本, 三年級難度, 做成學習單"
+                        text = $"你是一位資深的教育人員。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣與家長對話。" +
+                               "【重要強制指令】：在你的回答結束後，必須先換行，然後輸入一個管道符號 '|'，接著提供 3 個建議追問的短標題（每個 10 字以內），用逗號隔開。" +
+                               "回覆範例：親愛的家長...回覆內容 \n| 建立睡前儀式, 晨間節奏調整, 適合的小故事"
                     } } 
                 },
-                generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 }
+                generationConfig = new { maxOutputTokens = 1000, temperature = 0.7 }
             };
 
             try 
@@ -118,7 +121,7 @@ namespace isRock.Template
                 var response = await client.PostAsync(url, content);
                 var jsonResponse = await response.Content.ReadAsStringAsync();
 
-                if (!response.IsSuccessStatusCode) return ("導師正在沉思，請稍後再試。", 0);
+                if (!response.IsSuccessStatusCode) return ("AI正在連線中，請稍後再試。", 0);
 
                 dynamic? result = JsonConvert.DeserializeObject(jsonResponse);
                 string textResult = result?.candidates?[0]?.content?.parts?[0]?.text ?? "我看見了光。";
@@ -127,15 +130,13 @@ namespace isRock.Template
                 SearchCacheManager.SetCache(userQuery, textResult);
                 return (textResult, totalTokens);
             }
-            catch (Exception ex) { return ("AI 暫時切斷了聯繫。", 0); }
+            catch (Exception ex) { return ("AI暫時切斷了聯繫。", 0); }
         }
     }
 
-    // --- 5. LINE WebHook 控制器 (V1.3：Loading 動畫與動態按鈕) ---
+    // --- 5. LINE WebHook 控制器 (修正按鈕發送邏輯) ---
     public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
     {
-        private string ChannelToken => Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
-
         [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
         public IActionResult Get() => Ok("Bot is Alive!");
 
@@ -145,7 +146,7 @@ namespace isRock.Template
         {
             try
             {
-                this.ChannelAccessToken = ChannelToken;
+                this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
                 var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
                 if (lineEvent == null || string.IsNullOrEmpty(lineEvent.replyToken)) return Ok();
 
@@ -154,17 +155,17 @@ namespace isRock.Template
                     string userId = lineEvent.source.userId;
                     string userText = lineEvent.message.text;
 
-                    // 1. 立即啟動讀取中動畫 (Feature 1)
-                    _ = StartLoadingAnimation(userId, 5);
-
                     int currentCount = UsageManager.GetAndIncrementCount(out bool isOverLimit);
-                    if (isOverLimit) { this.ReplyMessage("🌟 今日配額已滿。"); return Ok(); }
+                    if (isOverLimit) {
+                        this.ReplyMessage(lineEvent.replyToken, "🌟 今日配額已滿。");
+                        return Ok();
+                    }
 
                     ChatHistoryManager.AddMessage(userId, "user", userText);
                     var (rawResponse, totalTokens) = await GeminiLLM.GetResponseAsync(userId, userText);
                     ChatHistoryManager.AddMessage(userId, "assistant", rawResponse);
 
-                    // 2. 解析動態建議按鈕 (Feature 2)
+                    // --- 解析邏輯 ---
                     string displayMsg = rawResponse;
                     var quickReplyItems = new List<isRock.LineBot.QuickReplyItem>();
 
@@ -172,46 +173,40 @@ namespace isRock.Template
                     {
                         var parts = rawResponse.Split('|');
                         displayMsg = parts[0].Trim(); 
-                        var suggestions = parts[1].Split(new[] { ',', '，' });
-                        foreach (var s in suggestions) {
-                            if (!string.IsNullOrWhiteSpace(s) && quickReplyItems.Count < 5)
-                                quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction(s.Trim(), s.Trim()));
+                        var suggestions = parts[1].Split(',');
+
+                        foreach (var suggestion in suggestions)
+                        {
+                            if (!string.IsNullOrWhiteSpace(suggestion))
+                                quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction(suggestion.Trim(), suggestion.Trim()));
                         }
                     }
 
-                    // 備援按鈕 (若 AI 沒給建議)
+                    // 備援：若 AI 沒給建議，強制加入預設按鈕
                     if (quickReplyItems.Count == 0)
                     {
-                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("更短版本", "請給我更簡短的版本"));
-                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("三年級難度", "請將難度調整為國小三年級程度"));
-                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("做成學習單", "請幫我設計成學習單內容"));
+                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("請再多說一點", "請導師再多跟我分享一些，謝謝。"));
+                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("對孩子的幫助？", "這對孩子的成長有什麼幫助呢？"));
+                        quickReplyItems.Add(new isRock.LineBot.QuickReplyTextAction("居家活動建議", "有什麼適合在家做的活動嗎？"));
                     }
 
                     string tokenInfo = totalTokens > 0 ? $"總計消耗：{totalTokens} tokens" : "（來自快取）";
                     string finalText = $"{displayMsg}\n\n次數：{currentCount}/500\n{tokenInfo}";
 
-                    // 3. 封裝並發送 (修正 ReplyMessage 呼叫)
+                    // --- 重要修正：確保使用正確的 SDK 物件發送按鈕 ---
                     var replyMsg = new isRock.LineBot.TextMessage(finalText);
                     replyMsg.quickReply.items.AddRange(quickReplyItems);
 
-                    // 重要：使用 MessageBase 物件時，SDK 會自動處理 replyToken
-                    this.ReplyMessage(replyMsg);
+                    // 使用 ReplyMessage 發送 Message 物件
+                    this.ReplyMessage(lineEvent.replyToken, replyMsg);
                 }
                 return Ok();
             }
-            catch (Exception ex) { Console.WriteLine(ex.ToString()); return Ok(); }
-        }
-
-        private async Task StartLoadingAnimation(string userId, int seconds)
-        {
-            try {
-                using var client = new HttpClient();
-                client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", ChannelToken);
-                var body = new { chatId = userId, loadingSeconds = seconds };
-                var json = JsonConvert.SerializeObject(body);
-                await client.PostAsync("https://api.line.me/v2/bot/chat/loading/start", 
-                    new StringContent(json, Encoding.UTF8, "application/json"));
-            } catch { }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+                return Ok();
+            }
         }
     }
 }
