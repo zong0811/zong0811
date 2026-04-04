@@ -88,119 +88,115 @@ namespace isRock.Template
         }
     }
 
-    // --- 4. Gemini 服務 (整合快取與台灣時區) ---
-    public static class GeminiLLM
+    // --- 4. Gemini 服務 (新增 Token 統計功能) ---
+public static class GeminiLLM
+{
+    private static string ApiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "你的API金鑰";
+    private const string ModelName = "gemini-3.1-flash-lite-preview";
+
+    // 修改回傳型別為 (string, int)，分別代表文字回應與總 Token 數
+    public static async Task<(string text, int tokens)> GetResponseAsync(string userId, string userQuery)
     {
-        private static string ApiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "你的API金鑰";
-        private const string ModelName = "gemini-3.1-flash-lite-preview";
-
-        public static async Task<string> GetResponseAsync(string userId, string userQuery)
+        if (SearchCacheManager.TryGetCache(userQuery, out string cachedResult))
         {
-            // A. 先檢查快取
-            if (SearchCacheManager.TryGetCache(userQuery, out string cachedResult))
+            // 快取命中時，因為沒有調用 API，我們回傳 0 代表未消耗新 Token
+            return (cachedResult, 0); 
+        }
+
+        string url = $"https://generativelanguage.googleapis.com/v1beta/models/{ModelName}:generateContent?key={ApiKey}";
+        DateTime twNow = DateTime.UtcNow.AddHours(8);
+        string currentTimeInfo = twNow.ToString("yyyy年MM月dd日 dddd");
+
+        var requestBody = new {
+            contents = ChatHistoryManager.GetHistory(userId),
+            systemInstruction = new { 
+                parts = new[] { new { 
+                    text = $"你是一位溫暖的華德福導師。現在是台灣時間 {currentTimeInfo}。請結合對話脈絡並用溫柔語氣回答問題。" 
+                } } 
+            },
+            generationConfig = new { maxOutputTokens = 1000, temperature = 0.7 }
+        };
+
+        try 
+        {
+            using var client = new HttpClient();
+            var content = new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json");
+            var response = await client.PostAsync(url, content);
+            var jsonResponse = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
             {
-                Console.WriteLine($">>> [快取命中] 使用者問題: {userQuery}");
-                return cachedResult;
+                Console.WriteLine($"======= [Gemini API 錯誤] {response.StatusCode} =======");
+                return ("導師正在沉思，請稍後再試。", 0);
             }
 
-            string url = $"https://generativelanguage.googleapis.com/v1beta/models/{ModelName}:generateContent?key={ApiKey}";
-            DateTime twNow = DateTime.UtcNow.AddHours(8);
-            string currentTimeInfo = twNow.ToString("yyyy年MM月dd日 dddd");
+            dynamic? result = JsonConvert.DeserializeObject(jsonResponse);
+            
+            // 1. 取得文字內容
+            string textResult = result?.candidates?[0]?.content?.parts?[0]?.text ?? "我看見了光，但現在無法言語。";
+            
+            // 2. 取得 Token 使用統計 (從 usageMetadata 抓取)
+            int totalTokens = result?.usageMetadata?.totalTokenCount ?? 0;
 
-            var requestBody = new {
-                contents = ChatHistoryManager.GetHistory(userId),
-                systemInstruction = new { 
-                    parts = new[] { new { 
-                        text = $"你是一位溫暖的華德福導師。現在是台灣時間 {currentTimeInfo}。請用溫柔且充滿生命力的語氣回答。" 
-                    } } 
-                },
-                generationConfig = new { maxOutputTokens = 1000, temperature = 0.7 }
-            };
-
-            try 
-            {
-                using var client = new HttpClient();
-                var content = new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json");
-                var response = await client.PostAsync(url, content);
-                var jsonResponse = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"======= [Gemini API 錯誤] {response.StatusCode} =======");
-                    return "導師正在沉思，請稍後再試。";
-                }
-
-                dynamic? result = JsonConvert.DeserializeObject(jsonResponse);
-                string textResult = result?.candidates?[0]?.content?.parts?[0]?.text ?? "我看見了光，但現在無法言語。";
-
-                // B. 存入快取
-                SearchCacheManager.SetCache(userQuery, textResult);
-                
-                return textResult;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($">>> [HttpClient 異常]: {ex.Message}");
-                return "導師暫時切斷了與外界的聯繫。";
-            }
+            SearchCacheManager.SetCache(userQuery, textResult);
+            
+            return (textResult, totalTokens);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($">>> [HttpClient 異常]: {ex.Message}");
+            return ("導師暫時切斷了與外界的聯繫。", 0);
         }
     }
+}
 
-    // --- 5. LINE WebHook 控制器 ---
-    public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
+// --- 5. LINE WebHook 控制器 (顯示 Token 資訊) ---
+public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
+{
+    // ... [HttpGet/Head 監控端點維持不變] ...
+
+    [Route("api/LineBotOpenAIWebHook")]
+    [HttpPost]
+    public async Task<IActionResult> POST()
     {
-        // 支援 Better Stack 監控 (GET & HEAD)
-        [HttpHead]
-        [HttpGet]
-        [Route("api/LineBotOpenAIWebHook")]
-        public IActionResult Get()
+        try
         {
-            return Ok("Bot is Alive!");
-        }
+            this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
+            var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
+            if (lineEvent == null || lineEvent.replyToken == "00000000000000000000000000000000") return Ok();
 
-        [Route("api/LineBotOpenAIWebHook")]
-        [HttpPost]
-        public async Task<IActionResult> POST()
-        {
-            try
+            if (lineEvent.type.ToLower() == "message" && lineEvent.message.type == "text")
             {
-                this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
-                var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
-                
-                if (lineEvent == null || lineEvent.replyToken == "00000000000000000000000000000000") return Ok();
+                string userId = lineEvent.source.userId;
+                string userText = lineEvent.message.text;
 
-                if (lineEvent.type.ToLower() == "message" && lineEvent.message.type == "text")
+                int currentCount = UsageManager.GetAndIncrementCount(out bool isOverLimit);
+                if (isOverLimit) 
                 {
-                    string userId = lineEvent.source.userId;
-                    string userText = lineEvent.message.text;
-
-                    // 1. 檢查次數
-                    int currentCount = UsageManager.GetAndIncrementCount(out bool isOverLimit);
-                    if (isOverLimit) 
-                    {
-                        this.ReplyMessage(lineEvent.replyToken, "🌟 今日的智慧分享已達 500 次上限，請等待下午三點靈魂甦醒後再會。");
-                        return Ok();
-                    }
-
-                    // 2. 處理對話
-                    ChatHistoryManager.AddMessage(userId, "user", userText);
-                    
-                    // 傳入 userId 與 userText 以利快取判定
-                    string responseMsg = await GeminiLLM.GetResponseAsync(userId, userText);
-                    
-                    ChatHistoryManager.AddMessage(userId, "assistant", responseMsg);
-
-                    // 3. 回覆 LINE
-                    this.ReplyMessage(lineEvent.replyToken, $"{responseMsg}\n\n次數記錄：{currentCount}/500");
+                    this.ReplyMessage(lineEvent.replyToken, "🌟 今日的智慧分享已達上限。");
+                    return Ok();
                 }
-                return Ok();
+
+                ChatHistoryManager.AddMessage(userId, "user", userText);
+                
+                // 【修改點】：接收文字與 Token 數
+                var (responseMsg, totalTokens) = await GeminiLLM.GetResponseAsync(userId, userText);
+                
+                ChatHistoryManager.AddMessage(userId, "assistant", responseMsg);
+
+                // 【修改點】：在回覆訊息中加入 Token 統計
+                string tokenInfo = totalTokens > 0 ? $"總計消耗：{totalTokens} tokens" : "（來自快取，未消耗點數）";
+                string finalReply = $"{responseMsg}\n\n次數：{currentCount}/500\n{tokenInfo}";
+
+                this.ReplyMessage(lineEvent.replyToken, finalReply);
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine("======= [WebHook 控制器崩潰] =======");
-                Console.WriteLine(ex.ToString());
-                return Ok();
-            }
+            return Ok();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(ex.ToString());
+            return Ok();
         }
     }
+}
 }
