@@ -19,91 +19,76 @@ namespace isRock.Template
 
         public static async Task<string> GetGeminiResponseAsync(string userId, string userQuery)
 {
-    try {
-        using var client = new HttpClient();
-        string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
-        string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
+    try {
+        using var client = new HttpClient();
+        string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GeminiKey}";
+        string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
-        // 1. 關鍵步驟：從 GAS 讀取持久化記憶
-        string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
-        var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
+        // 1. 讀取記憶
+        string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
+        var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
 
-        // 2. 建立動態內容陣列
-        var contents = new List<object>();
-        contents.AddRange(historyList); // 加入過去的對話紀錄
-        contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } }); // 加入當下的提問
+        // 2. 工具定義 (加入時區強制要求)
+        var tools = new object[] {
+            new { function_declarations = new object[] { 
+                new { name = "drive_search", description = "搜尋 Google Drive 中的檔案或教案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
+                new { name = "calendar_list", description = "查詢接下來一週的行程內容" },
+                new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { 
+                    summary = new { type = "string", description = "標題" }, 
+                    startTime = new { type = "string", description = "開始時間，格式必須為 yyyy-MM-ddTHH:mm:ss+08:00" }, 
+                    endTime = new { type = "string", description = "結束時間，格式必須為 yyyy-MM-ddTHH:mm:ss+08:00" } 
+                }, required = new[] { "summary", "startTime", "endTime" } } },
+                new { name = "gmail_send", description = "直接寄出郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
+                new { name = "add_lesson_note", description = "記錄教案筆記", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
+            } }
+        };
 
-        var tools = new object[] {
-            new { function_declarations = new object[] { 
-                new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
-                new { name = "calendar_list", description = "查詢接下來一週的行程" },
-                new { name = "calendar_add", description = "新增日曆行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string" }, endTime = new { type = "string" } }, required = new[] { "summary", "startTime", "endTime" } } },
-                new { name = "gmail_send", description = "直接寄出 Gmail 郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
-                new { name = "add_lesson_note", description = "記錄教案筆記", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
-            } }
-        };
+        var contents = new List<object>();
+        contents.AddRange(historyList);
+        contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
 
-        var requestBody = new {
-            contents = contents, // 使用包含記憶的內容
-            systemInstruction = new { 
-                parts = new[] { new { text = $"你是一位資深的教育人員。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣與使用者對話。" } } 
-            },
-            generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
-            tools = tools
-        };
+        var requestBody = new {
+            contents = contents,
+            systemInstruction = new { parts = new[] { new { text = $"你是一位資深的教育人員。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣對話。當執行工具獲得結果後，請務必詳細條列內容回覆給使用者。" } } },
+            generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
+            tools = tools
+        };
 
-                var res = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json"));
-                var resStr = await res.Content.ReadAsStringAsync();
-                dynamic? result = JsonConvert.DeserializeObject(resStr);
-                
-                var part = result?.candidates?[0]?.content?.parts?[0];
+        var res = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json"));
+        dynamic? result = JsonConvert.DeserializeObject(await res.Content.ReadAsStringAsync());
+        var part = result?.candidates?[0]?.content?.parts?[0];
 
-                if (part?.functionCall != null)
-                {
-                    string funcName = (string)part.functionCall.name;
-                    object gasPayload;
+        if (part?.functionCall != null)
+        {
+            string funcName = (string)part.functionCall.name;
+            object gasPayload = (funcName == "add_lesson_note") ? 
+                new { action = "custom_log", targetSheet = "教案記事本", rowContents = new[] { (string)part.functionCall.args.category, (string)part.functionCall.args.title, (string)part.functionCall.args.content } } :
+                new { action = funcName, args = part.functionCall.args };
 
-                    // 2. 邏輯判斷：如果是教案記事，則重新封裝給 GAS 的 custom_log
-                    if (funcName == "add_lesson_note") 
-                    { 
-                        gasPayload = new { 
-                            action = "custom_log", 
-                            targetSheet = "教案記事本", // 指定寫入的分頁 
-                            rowContents = new[] { 
-                                (string)part.functionCall.args.category, 
-                                (string)part.functionCall.args.title, 
-                                (string)part.functionCall.args.content 
-                            } 
-                        }; 
-                    }
-                    else 
-                    {
-                        gasPayload = new { action = funcName, args = part.functionCall.args };
-                    }
+            string gasRes = await CallGasAsync(gasPayload);
+            object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
 
-                    string gasRes = await CallGasAsync(gasPayload);
+            // 🌟 重要修正：第二次呼叫必須包含 historyList 
+            var finalContents = new List<object>();
+            finalContents.AddRange(historyList); // 補回歷史
+            finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
+            finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } });
+            finalContents.Add(new { role = "function", parts = new object[] { new { functionResponse = new { name = funcName, response = new { content = toolResultObject } } } } });
 
-                    object toolResultObject;
-                    try { toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { }; }
-                    catch { toolResultObject = new { raw_data = gasRes }; }
+            var finalBody = new {
+                contents = finalContents,
+                systemInstruction = requestBody.systemInstruction, // 補回角色設定
+                tools = tools
+            };
 
-                    var finalBody = new {
-                        contents = new object[] {
-                            new { role = "user", parts = new object[] { new { text = userQuery } } },
-                            new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } },
-                            new { role = "function", parts = new object[] { 
-                                new { functionResponse = new { name = funcName, response = new { content = toolResultObject } } } 
-                            } }
-                        }
-                    };
-                    var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
-                    dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
-                    return (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text ?? "動作已執行。";
-                }
-                return (string?)part?.text ?? "系統還在設定中...";
-            }
-            catch (Exception ex) { return $"系統異常：{ex.Message}"; }
-        }
+            var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
+            dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
+            return (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text ?? "抱歉，我讀取到了資料但無法整理成文字，建議您查看試算表紀錄。";
+        }
+        return (string?)part?.text ?? "老師正在思考中...";
+    }
+    catch (Exception ex) { return $"系統連線稍微有點狀況：{ex.Message}"; }
+}
 
         public static async Task<string> CallGasAsync(object payloadData)
         {
