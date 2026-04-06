@@ -63,21 +63,20 @@ namespace isRock.Template
                 // 4. 第二階段：處理 Function Calling
                 if (part?.functionCall != null)
 {
-    string funcName = (string)part.functionCall.name;
+    // 🌟 強制轉為字串並去除空白，確保判斷精準
+    string funcName = part.functionCall.name.ToString().Trim();
     object gasPayload;
 
     if (funcName == "add_lesson_note") 
     {
-        // 🌟 強化屬性讀取：確保 args 轉換為字串時不會出錯
         var args = part.functionCall.args;
+        // 🌟 改變策略：不再使用陣列，改用個別屬性 p1, p2, p3 傳遞
         gasPayload = new { 
             action = "custom_log", 
             targetSheet = "教案記事本", 
-            rowContents = new string[] { 
-                (string)(args.category ?? "教學靈感"), 
-                (string)(args.title ?? "未命名筆記"), 
-                (string)(args.content ?? "") 
-            } 
+            p1 = (string)(args.category ?? "教學靈感"), 
+            p2 = (string)(args.title ?? "未命名筆記"), 
+            p3 = (string)(args.content ?? "") 
         };
     }
     else 
@@ -85,32 +84,33 @@ namespace isRock.Template
         gasPayload = new { action = funcName, args = part.functionCall.args };
     }
 
-    // 執行 GAS 寫入，並確認結果
+    // 執行 GAS 寫入 (一定要 await 確保完成)
     string gasRes = await CallGasAsync(gasPayload);
-                    // 如果是紀錄功能，我們可以直接回傳成功訊息，節省第二次 Gemini 呼叫的時間 (更穩定且極速)
+    
+    // 🌟 為了速度與穩定性，紀錄功能直接回傳成功訊息，不跑第二階段
     if (funcName == "add_lesson_note") {
-        return $"✅ 老師，我已幫您記錄到「教案記事本」中：\n\n📌 **{part.functionCall.args.title}**\n({part.functionCall.args.category})";
+        return $"✅ 老師，我已幫您記錄到「教案記事本」中：\n\n📌 **{part.functionCall.args.title}**\n類別：{part.functionCall.args.category}";
     }
-                    // 搜尋類的功能才跑第二階段 Gemini
+
+    // 其餘搜尋功能（如雲端搜尋）才執行第二階段 Gemini 總結
     object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
+    var finalContents = new List<object>();
+    finalContents.AddRange(historyList);
+    finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
+    finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } });
+    finalContents.Add(new { role = "function", parts = new object[] { new { functionResponse = new { name = funcName, response = toolResultObject } } } });
 
-                    var finalContents = new List<object>();
-                    finalContents.AddRange(historyList);
-                    finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
-                    finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } });
-                    finalContents.Add(new { role = "function", parts = new object[] { new { functionResponse = new { name = funcName, response = toolResultObject } } } });
+    var finalBody = new {
+        contents = finalContents,
+        systemInstruction = requestBody.systemInstruction,
+        generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
+        tools = tools
+    };
 
-                    var finalBody = new {
-                        contents = finalContents,
-                        systemInstruction = requestBody.systemInstruction,
-                        generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
-                        tools = tools
-                    };
-
-                    var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
-                    dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
-                    return (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text ?? "已為您處理完成。";
-                }
+    var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
+    dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
+    return (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text ?? "已處理完成。";
+}
 
                 return (string?)part?.text ?? "老師，我正在為您思考中...";
             }
