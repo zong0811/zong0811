@@ -44,11 +44,13 @@ namespace isRock.Template
                 contents.AddRange(historyList);
                 contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
 
-                string systemPrompt = $"你是一位專業教育助理。現在時間 {currentTimeInfo}。\n" +
-                                     "優先使用內建知識回答時事、教育政策、教學技巧。只有使用者明確說「搜尋雲端」或「找檔案」才調用 drive_search。\n" +
-                                     "1. 行事曆：請用『● [時間] [事項]』格式呈現。\n" +
-                                     "2. 雲端檔案：請列出『檔名』，並將 URL 製作成超連結。\n" +
-                                     "3. 語氣溫柔且專業，條列化所有搜尋結果。";
+               string systemPrompt = $"你是一位溫柔且專業的資深教育人員。現在是台灣時間 {currentTimeInfo}。\n" +
+                     "【核心原則】：當你執行「新增教案」或「新增行事曆」後，你的最終回覆**嚴禁只回覆確認文字**。\n" +
+                     "【回覆結構要求】：\n" +
+                     "1. 先行提供內容：請根據使用者的要求，先詳細條列呈現你整理好的知識點（如政策要點、教案內容）。\n" +
+                     "2. 後說明儲存狀況：在內容下方使用分隔線，清晰註明儲存到試算表的『類別』、『標題』與『內容摘要』。\n" +
+                     "3. 主動互動：回覆最後針對剛才整理的內容主動提出一個引發討論的追蹤問題。\n" +
+                     "4. 格式：善用 Markdown 標題(###)與清單(*)，確保手機閱讀體驗優雅。";
 
                 var requestBody = new {
                     contents = contents,
