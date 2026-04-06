@@ -10,7 +10,6 @@ using Newtonsoft.Json;
 
 namespace isRock.Template
 {
-    // --- 服務層：負責所有對外 API 溝通 ---
     public static class BotService
     {
         private static string GeminiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
@@ -28,32 +27,31 @@ namespace isRock.Template
                 string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
                 var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
 
-                // 2. 工具定義 (加入時區規範描述)
+                // 2. 工具定義
                 var tools = new object[] {
                     new { function_declarations = new object[] { 
-                        new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
+                        new { name = "drive_search", description = "搜尋使用者的 Google Drive 檔案。僅當使用者明確要求『找檔案』時才調用。", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
                         new { name = "calendar_list", description = "查詢接下來一週的行程" },
-                        new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string", description = "格式務必為: yyyy-MM-ddTHH:mm:ss+08:00" }, endTime = new { type = "string", description = "格式務必為: yyyy-MM-ddTHH:mm:ss+08:00" } }, required = new[] { "summary", "startTime", "endTime" } } },
+                        new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string", description = "格式為: yyyy-MM-ddTHH:mm:ss+08:00" }, endTime = new { type = "string", description = "格式為: yyyy-MM-ddTHH:mm:ss+08:00" } }, required = new[] { "summary", "startTime", "endTime" } } },
                         new { name = "gmail_send", description = "直接寄出郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
-                        new { name = "add_lesson_note", description = "當老師提到『記一下』、『紀錄筆記』、『課堂觀察』或任何教案靈感、學生表現、教學心得時，務必調用此工具存入試算表。", parameters = new {type = "object", properties = new {category = new { type = "string", description = "課程分類，如：體育、語文、導師時間" },title = new { type = "string", description = "自動生成一個 10 字以內的精簡標題" }, content = new { type = "string", description = "詳細的觀察內容或靈感描述" }}, required = new[] { "category", "title", "content" }}}
+                        new { name = "add_lesson_note", description = "紀錄教案靈感或學生觀察筆記。", parameters = new {type = "object", properties = new {category = new { type = "string" },title = new { type = "string" }, content = new { type = "string" }}, required = new[] { "category", "title", "content" }}}
                     } }
                 };
 
-                // 3. 第一階段：判斷意圖
+                // 3. 系統提示詞優化 (解決誤觸搜尋問題)
+                string systemPrompt = $"你是一位專業教育助理。現在時間 {currentTimeInfo}。\n" +
+                                     "【運作守則】\n" +
+                                     "1. 優先使用內建知識回答時事、教育政策、教學技巧。只有使用者明確說「搜尋雲端」或「找檔案」才調用 drive_search。\n" +
+                                     "2. 回覆語氣溫柔專業，使用繁體中文。條列化回覆內容。\n" +
+                                     "3. 雲端檔案請顯示檔名並製作超連結。行事曆請用『● [時間] [事項]』呈現。";
+
                 var contents = new List<object>();
                 contents.AddRange(historyList);
                 contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
 
-                string systemPrompt = $"你是一位專業教育助理。現在時間 {currentTimeInfo}。\n" +
-                                     "請將 Google 回傳的 JSON 資料轉化為優雅的繁體中文排版：\n" +
-                                     "1. 行事曆：請用『● [時間] [事項]』格式呈現。\n" +
-                                     "2. 雲端檔案：請列出『檔名』，並將 URL 製作成超連結。\n" +
-                                     "3. 語氣溫柔且專業，條列化所有搜尋結果。";
-
                 var requestBody = new {
                     contents = contents,
                     systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
-                    // 🌟 加入 Generation Config
                     generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
                     tools = tools
                 };
@@ -73,36 +71,27 @@ namespace isRock.Template
                     string gasRes = await CallGasAsync(gasPayload);
                     object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
 
-                    // 構建完整對話鏈
                     var finalContents = new List<object>();
                     finalContents.AddRange(historyList);
                     finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
                     finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } });
-                    finalContents.Add(new { role = "function", parts = new object[] { 
-                        new { functionResponse = new { name = funcName, response = toolResultObject } } 
-                    } });
+                    finalContents.Add(new { role = "function", parts = new object[] { new { functionResponse = new { name = funcName, response = toolResultObject } } } });
 
                     var finalBody = new {
                         contents = finalContents,
                         systemInstruction = requestBody.systemInstruction,
-                        // 🌟 第二次呼叫也要加入 Config 確保回覆品質
                         generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
                         tools = tools
                     };
 
                     var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
                     dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
-                    string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
-
-                    // 備援排版機制
-                    if (string.IsNullOrEmpty(aiText)) return FormatFallback(funcName, gasRes, part.functionCall.args);
-
-                    return aiText;
+                    return (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text ?? "已為您處理完成。";
                 }
 
-                return (string?)part?.text ?? "導師正在為您準備回覆...";
+                return (string?)part?.text ?? "老師，我正在為您思考中...";
             }
-            catch (Exception ex) { return $"系統連線狀況：{ex.Message}"; }
+            catch (Exception ex) { return $"系統訊息：{ex.Message}"; }
         }
 
         public static async Task<string> CallGasAsync(object payloadData)
@@ -111,29 +100,9 @@ namespace isRock.Template
                 using var client = new HttpClient();
                 var dict = JsonConvert.DeserializeObject<Dictionary<string, object>>(JsonConvert.SerializeObject(payloadData)) ?? new Dictionary<string, object>();
                 dict["apiKey"] = GasApiKey;
-                var content = new StringContent(JsonConvert.SerializeObject(dict), Encoding.UTF8, "application/json");
-                var res = await client.PostAsync(GasUrl, content);
+                var res = await client.PostAsync(GasUrl, new StringContent(JsonConvert.SerializeObject(dict), Encoding.UTF8, "application/json"));
                 return await res.Content.ReadAsStringAsync();
             } catch { return "{}"; }
-        }
-
-        private static string FormatFallback(string funcName, string rawJson, dynamic args) {
-            if (funcName == "drive_search") {
-                var files = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(rawJson);
-                var sb = new StringBuilder("老師，我為您找到了以下檔案：\n\n");
-                foreach(var f in files) sb.AppendLine($"📄 **{f["name"]}**\n🔗 {f["url"]}\n");
-                return sb.ToString();
-            }
-            if (funcName == "calendar_list") {
-                var events = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(rawJson);
-                var sb = new StringBuilder("老師，您接下來的行程如下：\n\n");
-                foreach(var e in events) sb.AppendLine($"⏰ {e["start"]}\n📌 {e["summary"]}\n");
-                return sb.ToString();
-            }
-            if (funcName == "calendar_add") return $"我已完成 \"{args.summary}\" 行事曆新增。";
-            if (funcName == "add_lesson_note") return $"我已完成 \"{args.title}\" 教案記事新增。";
-            if (funcName == "gmail_send") return $"我已寄出 \"{args.subject}\" 的郵件。";
-            return $"動作已執行成功！內容如下：\n{rawJson}";
         }
     }
 
@@ -141,6 +110,7 @@ namespace isRock.Template
     {
         [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
         public IActionResult Get() => Ok("AI Google助手已經設定完成");
+
 
         [HttpPost] [Route("api/LineBotOpenAIWebHook")]
         public async Task<IActionResult> POST()
@@ -154,25 +124,30 @@ namespace isRock.Template
                 string userId = lineEvent.source.userId;
                 string userText = lineEvent.message.text;
 
-                var usageResJson = await BotService.CallGasAsync(new { action = "usage_increment", userId = userId });
-                dynamic? usageRes = JsonConvert.DeserializeObject(usageResJson);
-                int currentCount = usageRes?.count ?? 0;
+                // --- 優化點：並行啟動使用量計算與 Gemini 回應 ---
+                var usageTask = BotService.CallGasAsync(new { action = "usage_increment", userId = userId });
+                var aiTask = BotService.GetGeminiResponseAsync(userId, userText);
 
+                // 啟動動畫 (非同步)
                 _ = Task.Run(async () => {
                     using var client = new HttpClient();
                     client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", this.ChannelAccessToken);
                     await client.PostAsync("https://api.line.me/v2/bot/chat/loading/start", 
-                        new StringContent(JsonConvert.SerializeObject(new { chatId = userId, loadingSeconds = 20 }), Encoding.UTF8, "application/json"));
+                        new StringContent(JsonConvert.SerializeObject(new { chatId = userId, loadingSeconds = 10 }), Encoding.UTF8, "application/json"));
                 });
 
-                string aiResponse = await BotService.GetGeminiResponseAsync(userId, userText);
+                // 等待回應
+                string aiResponse = await aiTask;
+                dynamic? usageRes = JsonConvert.DeserializeObject(await usageTask);
+                int count = usageRes?.count ?? 0;
 
-                _ = BotService.CallGasAsync(new { action = "sheets_append", userId = userId, userText = userText, aiResponse = aiResponse, count = currentCount });
+                // 異步寫入日誌
+                _ = BotService.CallGasAsync(new { action = "sheets_append", userId = userId, userText = userText, aiResponse = aiResponse, count = count });
 
-                this.ReplyMessage(lineEvent.replyToken, $"{aiResponse}\n\n使用量：{currentCount}/500");
+                this.ReplyMessage(lineEvent.replyToken, $"{aiResponse}\n\n使用量：{count}/500");
                 return Ok();
             }
-            catch (Exception ex) { Console.WriteLine(ex.Message); return Ok(); }
+            catch { return Ok(); }
         }
     }
 }
