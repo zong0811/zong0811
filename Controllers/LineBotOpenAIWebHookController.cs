@@ -21,47 +21,54 @@ namespace isRock.Template
 {
     try {
         using var client = new HttpClient();
-        // 🌟 依照要求，維持使用 gemini-3.1-flash-lite-preview
+        // 🌟 維持使用您要求的 3.1 預覽版模型
         string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
+        
+        // 取得台灣時間，這能幫助 AI 正確判斷「明天」、「下午」
         string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
-        // 1. 從 GAS 讀取歷史記憶
+        // 1. 讀取長期記憶
         string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
         var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
 
-        // 2. 工具定義 (加入時區描述，解決 12 AM 問題)
+        // 2. 工具定義：加入「強制時區規範」解決 12AM 偏移問題
         var tools = new object[] {
             new { function_declarations = new object[] { 
-                new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
-                new { name = "calendar_list", description = "查詢接下來一週的行程內容" },
+                new { name = "drive_search", description = "搜尋 Google Drive 中的檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
+                new { name = "calendar_list", description = "查詢接下來一週的行程" },
                 new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { 
-                    summary = new { type = "string" }, 
-                    startTime = new { type = "string", description = "格式務必為: yyyy-MM-ddTHH:mm:ss+08:00" }, 
-                    endTime = new { type = "string", description = "格式務必為: yyyy-MM-ddTHH:mm:ss+08:00" } 
+                    summary = new { type = "string", description = "活動名稱" }, 
+                    startTime = new { type = "string", description = "ISO格式且務必包含時區偏移，例如: 2026-04-07T16:00:00+08:00" }, 
+                    endTime = new { type = "string", description = "ISO格式且務必包含時區偏移，例如: 2026-04-07T17:00:00+08:00" } 
                 }, required = new[] { "summary", "startTime", "endTime" } } },
-                new { name = "gmail_send", description = "直接寄出電子郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
-                new { name = "add_lesson_note", description = "記錄教案筆記", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
+                new { name = "gmail_send", description = "直接寄出郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
+                new { name = "add_lesson_note", description = "記錄教學筆記或教案靈感", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
             } }
         };
 
-        // 3. 第一次呼叫內容：包含歷史記憶
+        // 3. 準備發送內容
         var contents = new List<object>();
         contents.AddRange(historyList);
         contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
 
         var requestBody = new {
             contents = contents,
-            systemInstruction = new { parts = new[] { new { text = $"你是一位資深的教育人員。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣對話。當獲得工具執行結果後，請詳細整理並條列內容回覆給使用者。" } } },
+            systemInstruction = new { parts = new[] { new { text = $"你是一位資深的教育人員。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣對話。當執行工具後收到回傳資料，請務必將內容條列化整理給使用者。" } } },
             generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
             tools = tools
         };
 
+        // 第一次呼叫 (判定意圖)
         var res = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json"));
         var resStr = await res.Content.ReadAsStringAsync();
+        
+        // Debug: 如果 API 回傳錯誤，你會在 Console 看到原因
+        if (!res.IsSuccessStatusCode) Console.WriteLine($"API Error 1: {resStr}");
+
         dynamic? result = JsonConvert.DeserializeObject(resStr);
         var part = result?.candidates?[0]?.content?.parts?[0];
 
-        // 4. 處理工具呼叫
+        // 4. 處理工具執行 (Function Calling)
         if (part?.functionCall != null)
         {
             string funcName = (string)part.functionCall.name;
@@ -69,57 +76,44 @@ namespace isRock.Template
                 new { action = "custom_log", targetSheet = "教案記事本", rowContents = new[] { (string)part.functionCall.args.category, (string)part.functionCall.args.title, (string)part.functionCall.args.content } } :
                 new { action = funcName, args = part.functionCall.args };
 
+            // 呼叫 GAS
             string gasRes = await CallGasAsync(gasPayload);
-            
-            // 解析 GAS 結果
             object toolResultObject;
-            try { toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { result = gasRes }; }
-            catch { toolResultObject = new { result = gasRes }; }
+            try { toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { }; }
+            catch { toolResultObject = new { raw_data = gasRes }; }
 
-            // 🌟 關鍵修正：第二次呼叫必須建立完整的上下文鏈結 (Context Chain)
+            // 🌟 核心修正：建構嚴謹的「多輪對話鏈」
             var finalContents = new List<object>();
-            finalContents.AddRange(historyList); // 加入對話歷史
-            finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } }); // 使用者問題
-            finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } }); // AI 要求呼叫工具
+            finalContents.AddRange(historyList); // 1. 歷史
+            finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } }); // 2. 提問
+            finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } }); // 3. 呼叫命令
             finalContents.Add(new { role = "function", parts = new object[] { 
-                new { functionResponse = new { name = funcName, response = new { content = toolResultObject } } } 
-            } }); // 工具執行結果
+                new { functionResponse = new { name = funcName, response = toolResultObject } } 
+            } }); // 4. 執行結果 (直接傳入物件，不需額外包 content)
 
             var finalBody = new {
                 contents = finalContents,
-                systemInstruction = requestBody.systemInstruction, // 角色設定也要補回
+                systemInstruction = requestBody.systemInstruction,
                 tools = tools
             };
 
+            // 第二次呼叫 (總結結果)
             var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
             var finalResStr = await finalRes.Content.ReadAsStringAsync();
+            
+            // Debug: 檢查第二次呼叫是否出錯
+            if (!finalRes.IsSuccessStatusCode) Console.WriteLine($"API Error 2: {finalResStr}");
+
             dynamic? finalJson = JsonConvert.DeserializeObject(finalResStr);
-            
-            // 嘗試取得 AI 生成的最終文字
             string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
-            
-            return aiText ?? "動作已成功執行，但我暫時無法產生摘要。請確認您的雲端紀錄。";
+
+            return aiText ?? "我已完成動作，但暫時無法產生文字摘要，請確認雲端紀錄。";
         }
 
         return (string?)part?.text ?? "AI正在思考中...";
     }
-    catch (Exception ex) { return $"系統連線出了問題：{ex.Message}"; }
+    catch (Exception ex) { return $"系統連線異常：{ex.Message}"; }
 }
-
-        public static async Task<string> CallGasAsync(object payloadData)
-        {
-            try {
-                using var client = new HttpClient();
-                string json = JsonConvert.SerializeObject(payloadData);
-                var dict = JsonConvert.DeserializeObject<Dictionary<string, object>>(json) ?? new Dictionary<string, object>();
-                dict["apiKey"] = GasApiKey;
-
-                var content = new StringContent(JsonConvert.SerializeObject(dict), Encoding.UTF8, "application/json");
-                var res = await client.PostAsync(GasUrl, content);
-                return await res.Content.ReadAsStringAsync();
-            } catch { return "{}"; }
-        }
-    }
 
     public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
     {
