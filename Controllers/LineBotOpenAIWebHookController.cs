@@ -109,7 +109,7 @@ namespace isRock.Template
     {
         // 🌟 建議加在這裡：這讓瀏覽器或測試工具可以直接透過 GET 存取這個網址
         [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
-        public IActionResult Get() => Ok("Bot is Alive!");        
+        public IActionResult Get() => Ok("Bot is Alive! 04/06版");        
         [HttpPost] [Route("api/LineBotOpenAIWebHook")]
         public async Task<IActionResult> POST()
         {
