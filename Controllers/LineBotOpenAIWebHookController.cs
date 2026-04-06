@@ -114,40 +114,49 @@ namespace isRock.Template
 
         [HttpPost] [Route("api/LineBotOpenAIWebHook")]
         public async Task<IActionResult> POST()
-        {
-            try
-            {
-                this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
-                var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
-                if (lineEvent == null || lineEvent.type.ToLower() != "message" || lineEvent.message.type != "text") return Ok();
+{
+    try
+    {
+        this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
+        var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
+        if (lineEvent == null || lineEvent.type.ToLower() != "message" || lineEvent.message.type != "text") return Ok();
 
-                string userId = lineEvent.source.userId;
-                string userText = lineEvent.message.text;
+        string userId = lineEvent.source.userId;
+        string userText = lineEvent.message.text;
 
-                // --- 優化點：並行啟動使用量計算與 Gemini 回應 ---
-                var usageTask = BotService.CallGasAsync(new { action = "usage_increment", userId = userId });
-                var aiTask = BotService.GetGeminiResponseAsync(userId, userText);
+        // --- 加速關鍵：並行處理 ---
+        var usageTask = BotService.CallGasAsync(new { action = "usage_increment", userId = userId });
+        
+        // 啟動 Loading 動畫 (不等待)
+        _ = Task.Run(async () => {
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", this.ChannelAccessToken);
+            await client.PostAsync("https://api.line.me/v2/bot/chat/loading/start", 
+                new StringContent(JsonConvert.SerializeObject(new { chatId = userId, loadingSeconds = 15 }), Encoding.UTF8, "application/json"));
+        });
 
-                // 啟動動畫 (非同步)
-                _ = Task.Run(async () => {
-                    using var client = new HttpClient();
-                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", this.ChannelAccessToken);
-                    await client.PostAsync("https://api.line.me/v2/bot/chat/loading/start", 
-                        new StringContent(JsonConvert.SerializeObject(new { chatId = userId, loadingSeconds = 10 }), Encoding.UTF8, "application/json"));
-                });
+        // 取得 Gemini 回應 (這內部會處理 Function Calling 並回傳最終文字)
+        string aiResponse = await BotService.GetGeminiResponseAsync(userId, userText);
 
-                // 等待回應
-                string aiResponse = await aiTask;
-                dynamic? usageRes = JsonConvert.DeserializeObject(await usageTask);
-                int count = usageRes?.count ?? 0;
+        // 等待使用量計算完成
+        dynamic? usageRes = JsonConvert.DeserializeObject(await usageTask);
+        int count = usageRes?.count ?? 0;
 
-                // 異步寫入日誌
-                _ = BotService.CallGasAsync(new { action = "sheets_append", userId = userId, userText = userText, aiResponse = aiResponse, count = count });
+        // --- 修正點：確保對話紀錄與工具執行結果都被存檔 ---
+        _ = BotService.CallGasAsync(new { 
+            action = "sheets_append", 
+            userId = userId, 
+            userText = userText, 
+            aiResponse = aiResponse, 
+            count = count 
+        });
 
-                this.ReplyMessage(lineEvent.replyToken, $"{aiResponse}\n\n使用量：{count}/500");
-                return Ok();
-            }
-            catch { return Ok(); }
+        this.ReplyMessage(lineEvent.replyToken, $"{aiResponse}\n\n使用量：{count}/500");
+        return Ok();
+    }
+    catch (Exception ex) {
+        Console.WriteLine($"Error: {ex.Message}");
+        return Ok(); }
         }
     }
 }
