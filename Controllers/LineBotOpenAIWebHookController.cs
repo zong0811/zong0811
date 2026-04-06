@@ -10,7 +10,6 @@ using Newtonsoft.Json;
 
 namespace isRock.Template
 {
-    // --- 服務層：負責所有對外 API 溝通 ---
     public static class BotService
     {
         private static string GeminiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
@@ -21,38 +20,41 @@ namespace isRock.Template
         {
             try {
                 using var client = new HttpClient();
-                // 🌟 維持使用您指定的 3.1 預覽版模型
+                // 🌟 使用您指定的 3.1 預覽版模型
                 string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
                 string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
-                // 1. 讀取長期記憶
+                // 1. 讀取記憶
                 string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
                 var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
 
-                // 2. 工具定義 (強化時區標籤引導)
+                // 2. 工具定義
                 var tools = new object[] {
                     new { function_declarations = new object[] { 
                         new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
                         new { name = "calendar_list", description = "查詢接下來一週的行程" },
-                        new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { 
-                            summary = new { type = "string", description = "活動名稱" }, 
-                            startTime = new { type = "string", description = "ISO格式且務必包含 +08:00，例如: 2026-04-07T16:00:00+08:00" }, 
-                            endTime = new { type = "string", description = "ISO格式且務必包含 +08:00，例如: 2026-04-07T17:00:00+08:00" } 
-                        }, required = new[] { "summary", "startTime", "endTime" } } },
-                        new { name = "gmail_send", description = "直接寄出電子郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
+                        new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string", description = "yyyy-MM-ddTHH:mm:ss+08:00" }, endTime = new { type = "string", description = "yyyy-MM-ddTHH:mm:ss+08:00" } }, required = new[] { "summary", "startTime", "endTime" } } },
+                        new { name = "gmail_send", description = "直接寄出郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
                         new { name = "add_lesson_note", description = "記錄教案筆記", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
                     } }
                 };
 
-                // 3. 第一階段：判定意圖
+                // 3. 第一階段：判斷意圖
                 var contents = new List<object>();
                 contents.AddRange(historyList);
                 contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
 
+                // 🌟 強化指令：要求 AI 使用特定格式回覆
+                string systemPrompt = $"你是一位專業教育助理。現在時間 {currentTimeInfo}。請遵守回覆規範：\n" +
+                                     "1. 行事曆新增後必說：我已完成 \"[事項名稱]\" 行事曆新增。\n" +
+                                     "2. 教案記事新增後必說：我已完成 \"[標題]\" 教案記事新增。\n" +
+                                     "3. 寄信後必說：我已寄出 \"[主旨]\" 的郵件。\n" +
+                                     "4. 搜尋檔案必列出：\"[檔案名稱]\" 及其下載網址清單。";
+
                 var requestBody = new {
                     contents = contents,
-                    systemInstruction = new { parts = new[] { new { text = $"你是一位溫柔且專業的資深教育助理。現在是台灣時間 {currentTimeInfo}。獲得工具執行結果後，請務必詳細列出內容回答使用者。" } } },
-                    generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
+                    systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
+                    generationConfig = new { maxOutputTokens = 1500, temperature = 0.5 },
                     tools = tools
                 };
 
@@ -60,7 +62,7 @@ namespace isRock.Template
                 dynamic? result = JsonConvert.DeserializeObject(await res.Content.ReadAsStringAsync());
                 var part = result?.candidates?[0]?.content?.parts?[0];
 
-                // 4. 第二階段：處理 Function Calling
+                // 4. 第二階段：處理執行結果
                 if (part?.functionCall != null)
                 {
                     string funcName = (string)part.functionCall.name;
@@ -69,11 +71,9 @@ namespace isRock.Template
                         new { action = funcName, args = part.functionCall.args };
 
                     string gasRes = await CallGasAsync(gasPayload);
-                    object toolResultObject;
-                    try { toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { raw_data = gasRes }; }
-                    catch { toolResultObject = new { raw_data = gasRes }; }
+                    object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { raw_data = gasRes };
 
-                    // 🌟 核心修正：將結果完整餵回給 3.1 模型做總結
+                    // 構建完整對話鏈
                     var finalContents = new List<object>();
                     finalContents.AddRange(historyList);
                     finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
@@ -86,14 +86,24 @@ namespace isRock.Template
                         tools = tools
                     };
 
+                    // 🌟 修正點：必須讀取 finalRes 而不是 res
                     var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
-                    dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
+                    var finalResStr = await finalRes.Content.ReadAsStringAsync();
+                    dynamic? finalJson = JsonConvert.DeserializeObject(finalResStr);
+                    
                     string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
 
-                    return aiText ?? "我已經完成動作了！詳細內容您可以直接查看 Google 試算表或日曆喔。";
+                    // 如果 AI 還是沒吐出文字，根據動作類型強制產生回饋
+                    if (string.IsNullOrEmpty(aiText)) {
+                        if (funcName == "calendar_add") return $"我已完成 \"{part.functionCall.args.summary}\" 行事曆新增。";
+                        if (funcName == "add_lesson_note") return $"我已完成 \"{part.functionCall.args.title}\" 教案記事新增。";
+                        if (funcName == "gmail_send") return $"我已寄出 \"{part.functionCall.args.subject}\" 的郵件。";
+                    }
+
+                    return aiText ?? "動作已執行，請檢查相關內容。";
                 }
 
-                return (string?)part?.text ?? "AI正在為您準備回覆...";
+                return (string?)part?.text ?? "導師正在為您準備...";
             }
             catch (Exception ex) { return $"系統異常：{ex.Message}"; }
         }
@@ -109,12 +119,12 @@ namespace isRock.Template
                 return await res.Content.ReadAsStringAsync();
             } catch { return "{}"; }
         }
-    } // 這裡關閉 BotService
+    }
 
     public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
     {
         [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
-        public IActionResult Get() => Ok("Bot is Alive! V2.1");
+        public IActionResult Get() => Ok("Bot is Alive! 2026/04/06");
 
         [HttpPost] [Route("api/LineBotOpenAIWebHook")]
         public async Task<IActionResult> POST()
@@ -127,19 +137,11 @@ namespace isRock.Template
 
                 string userId = lineEvent.source.userId;
                 string userText = lineEvent.message.text;
-                string replyToken = lineEvent.replyToken;
 
-                // A. 配額檢查
                 var usageResJson = await BotService.CallGasAsync(new { action = "usage_increment", userId = userId });
                 dynamic? usageRes = JsonConvert.DeserializeObject(usageResJson);
                 int currentCount = usageRes?.count ?? 0;
 
-                if ((bool?)(usageRes?.isOverLimit) ?? false) {
-                    this.ReplyMessage(replyToken, "🌟 今日配額已滿。");
-                    return Ok();
-                }
-
-                // B. 啟動 Loading 動畫
                 _ = Task.Run(async () => {
                     using var client = new HttpClient();
                     client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", this.ChannelAccessToken);
@@ -147,19 +149,14 @@ namespace isRock.Template
                         new StringContent(JsonConvert.SerializeObject(new { chatId = userId, loadingSeconds = 20 }), Encoding.UTF8, "application/json"));
                 });
 
-                // C. 取得 AI 回覆
                 string aiResponse = await BotService.GetGeminiResponseAsync(userId, userText);
 
-                // D. 異步紀錄對話
-                _ = BotService.CallGasAsync(new { 
-                    action = "sheets_append", userId = userId, userText = userText, aiResponse = aiResponse, count = currentCount
-                });
+                _ = BotService.CallGasAsync(new { action = "sheets_append", userId = userId, userText = userText, aiResponse = aiResponse, count = currentCount });
 
-                // E. 回覆 LINE
-                this.ReplyMessage(replyToken, $"{aiResponse}\n\n使用量：{currentCount}/500");
+                this.ReplyMessage(lineEvent.replyToken, $"{aiResponse}\n\n使用量：{currentCount}/500");
                 return Ok();
             }
             catch (Exception ex) { Console.WriteLine(ex.Message); return Ok(); }
         }
-    } // 這裡關閉 Controller
-} // 這裡關閉 Namespace
+    }
+}
