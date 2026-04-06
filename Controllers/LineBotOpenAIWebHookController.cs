@@ -10,176 +10,169 @@ using Newtonsoft.Json;
 
 namespace isRock.Template
 {
-    public static class BotService
-    {
-        private static string GeminiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
-        private static string GasUrl => Environment.GetEnvironmentVariable("GAS_WEB_APP_URL") ?? "";
-        private static string GasApiKey => Environment.GetEnvironmentVariable("GAS_API_KEY") ?? "";
+    // --- 服務層：負責所有對外 API 溝通 ---
+    public static class BotService
+    {
+        private static string GeminiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
+        private static string GasUrl => Environment.GetEnvironmentVariable("GAS_WEB_APP_URL") ?? "";
+        private static string GasApiKey => Environment.GetEnvironmentVariable("GAS_API_KEY") ?? "";
 
-        public static async Task<string> GetGeminiResponseAsync(string userId, string userQuery)
-        {
-            try {
-                using var client = new HttpClient();
-                string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
-                string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
+        public static async Task<string> GetGeminiResponseAsync(string userId, string userQuery)
+        {
+            try {
+                using var client = new HttpClient();
+                string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
+                string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
-                // 1. 讀取長期記憶
-                string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
-                var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
+                // 1. 讀取長期記憶
+                string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
+                var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
 
-                // 2. 工具定義
-                var tools = new object[] {
-                    new { function_declarations = new object[] { 
-                        new { name = "drive_search", description = "搜尋使用者的 Google Drive 檔案。僅當使用者明確要求『找檔案』時才調用。", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
-                        new { name = "calendar_list", description = "查詢接下來一週的行程" },
-                        new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string", description = "格式為: yyyy-MM-ddTHH:mm:ss+08:00" }, endTime = new { type = "string", description = "格式為: yyyy-MM-ddTHH:mm:ss+08:00" } }, required = new[] { "summary", "startTime", "endTime" } } },
-                        new { name = "gmail_send", description = "直接寄出郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
-                        new { name = "add_lesson_note", description = "紀錄教案靈感或學生觀察筆記。", parameters = new {type = "object", properties = new {category = new { type = "string" },title = new { type = "string" }, content = new { type = "string" }}, required = new[] { "category", "title", "content" }}}
-                    } }
-                };
+                // 2. 工具定義 (加入時區規範描述)
+                var tools = new object[] {
+                    new { function_declarations = new object[] { 
+                        new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
+                        new { name = "calendar_list", description = "查詢接下來一週的行程" },
+                        new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string", description = "格式務必為: yyyy-MM-ddTHH:mm:ss+08:00" }, endTime = new { type = "string", description = "格式務必為: yyyy-MM-ddTHH:mm:ss+08:00" } }, required = new[] { "summary", "startTime", "endTime" } } },
+                        new { name = "gmail_send", description = "直接寄出郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
+                        new { name = "add_lesson_note", description = "當老師提到『記一下』、『紀錄筆記』、『課堂觀察』或任何教案靈感、學生表現、教學心得時，務必調用此工具存入試算表。", parameters = new {type = "object", properties = new {category = new { type = "string", description = "課程分類，如：體育、語文、導師時間" },title = new { type = "string", description = "自動生成一個 10 字以內的精簡標題" }, content = new { type = "string", description = "詳細的觀察內容或靈感描述" }}, required = new[] { "category", "title", "content" }}}
+                    } }
+                };
 
-                // 3. 系統提示詞優化 (解決誤觸搜尋問題)
-                string systemPrompt = $"你是一位專業教育助理。現在時間 {currentTimeInfo}。\n" +
-                                     "【運作守則】\n" +
-                                     "1. 優先使用內建知識回答時事、教育政策、教學技巧。只有使用者明確說「搜尋雲端」或「找檔案」才調用 drive_search。\n" +
-                                     "2. 回覆語氣溫柔專業，使用繁體中文。條列化回覆內容。\n" +
-                                     "3. 雲端檔案請顯示檔名並製作超連結。行事曆請用『● [時間] [事項]』呈現。";
+                // 3. 第一階段：判斷意圖
+                var contents = new List<object>();
+                contents.AddRange(historyList);
+                contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
 
-                var contents = new List<object>();
-                contents.AddRange(historyList);
-                contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
+                string systemPrompt = $"你是一位專業教育助理。現在時間 {currentTimeInfo}。\n" +
+                                     "優先使用內建知識回答時事、教育政策、教學技巧。只有使用者明確說「搜尋雲端」或「找檔案」才調用 drive_search。\n" +
+                                     "1. 行事曆：請用『● [時間] [事項]』格式呈現。\n" +
+                                     "2. 雲端檔案：請列出『檔名』，並將 URL 製作成超連結。\n" +
+                                     "3. 語氣溫柔且專業，條列化所有搜尋結果。";
 
-                var requestBody = new {
-                    contents = contents,
-                    systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
-                    generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
-                    tools = tools
-                };
+                var requestBody = new {
+                    contents = contents,
+                    systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
+                    // 🌟 加入 Generation Config
+                    generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
+                    tools = tools
+                };
 
-                var res = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json"));
-                dynamic? result = JsonConvert.DeserializeObject(await res.Content.ReadAsStringAsync());
-                var part = result?.candidates?[0]?.content?.parts?[0];
+                var res = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json"));
+                dynamic? result = JsonConvert.DeserializeObject(await res.Content.ReadAsStringAsync());
+                var part = result?.candidates?[0]?.content?.parts?[0];
 
-                // 4. 第二階段：處理 Function Calling
-                if (part?.functionCall != null)
-{
-    // 🌟 強制轉為字串並去除空白，確保判斷精準
-    string funcName = part.functionCall.name.ToString().Trim();
-    object gasPayload;
+                // 4. 第二階段：處理 Function Calling
+                if (part?.functionCall != null)
+                {
+                    string funcName = (string)part.functionCall.name;
+                    object gasPayload = (funcName == "add_lesson_note") ? 
+                        new { action = "custom_log", targetSheet = "教案記事本", rowContents = new[] { (string)part.functionCall.args.category, (string)part.functionCall.args.title, (string)part.functionCall.args.content } } :
+                        new { action = funcName, args = part.functionCall.args };
 
-    if (funcName == "add_lesson_note") 
-    {
-        var args = part.functionCall.args;
-        // 🌟 改變策略：不再使用陣列，改用個別屬性 p1, p2, p3 傳遞
-        gasPayload = new { 
-            action = "custom_log", 
-            targetSheet = "教案記事本", 
-            p1 = (string)(args.category ?? "教學靈感"), 
-            p2 = (string)(args.title ?? "未命名筆記"), 
-            p3 = (string)(args.content ?? "") 
-        };
-    }
-    else 
-    {
-        gasPayload = new { action = funcName, args = part.functionCall.args };
-    }
+                    string gasRes = await CallGasAsync(gasPayload);
+                    object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
 
-    // 執行 GAS 寫入 (一定要 await 確保完成)
-    string gasRes = await CallGasAsync(gasPayload);
-    
-    // 🌟 為了速度與穩定性，紀錄功能直接回傳成功訊息，不跑第二階段
-    if (funcName == "add_lesson_note") {
-        return $"✅ 老師，我已幫您記錄到「教案記事本」中：\n\n📌 **{part.functionCall.args.title}**\n類別：{part.functionCall.args.category}";
-    }
+                    // 構建完整對話鏈
+                    var finalContents = new List<object>();
+                    finalContents.AddRange(historyList);
+                    finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
+                    finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } });
+                    finalContents.Add(new { role = "function", parts = new object[] { 
+                        new { functionResponse = new { name = funcName, response = toolResultObject } } 
+                    } });
 
-    // 其餘搜尋功能（如雲端搜尋）才執行第二階段 Gemini 總結
-    object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
-    var finalContents = new List<object>();
-    finalContents.AddRange(historyList);
-    finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
-    finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } });
-    finalContents.Add(new { role = "function", parts = new object[] { new { functionResponse = new { name = funcName, response = toolResultObject } } } });
+                    var finalBody = new {
+                        contents = finalContents,
+                        systemInstruction = requestBody.systemInstruction,
+                        // 🌟 第二次呼叫也要加入 Config 確保回覆品質
+                        generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
+                        tools = tools
+                    };
 
-    var finalBody = new {
-        contents = finalContents,
-        systemInstruction = requestBody.systemInstruction,
-        generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
-        tools = tools
-    };
+                    var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
+                    dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
+                    string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
 
-    var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
-    dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
-    return (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text ?? "已處理完成。";
-}
+                    // 備援排版機制
+                    if (string.IsNullOrEmpty(aiText)) return FormatFallback(funcName, gasRes, part.functionCall.args);
 
-                return (string?)part?.text ?? "老師，我正在為您思考中...";
-            }
-            catch (Exception ex) { return $"系統訊息：{ex.Message}"; }
-        }
+                    return aiText;
+                }
 
-        public static async Task<string> CallGasAsync(object payloadData)
-        {
-            try {
-                using var client = new HttpClient();
-                var dict = JsonConvert.DeserializeObject<Dictionary<string, object>>(JsonConvert.SerializeObject(payloadData)) ?? new Dictionary<string, object>();
-                dict["apiKey"] = GasApiKey;
-                var res = await client.PostAsync(GasUrl, new StringContent(JsonConvert.SerializeObject(dict), Encoding.UTF8, "application/json"));
-                return await res.Content.ReadAsStringAsync();
-            } catch { return "{}"; }
-        }
-    }
+                return (string?)part?.text ?? "導師正在為您準備回覆...";
+            }
+            catch (Exception ex) { return $"系統連線狀況：{ex.Message}"; }
+        }
 
-    public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
-    {
-        [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
-        public IActionResult Get() => Ok("AI Google助手已經設定完成");
+        public static async Task<string> CallGasAsync(object payloadData)
+        {
+            try {
+                using var client = new HttpClient();
+                var dict = JsonConvert.DeserializeObject<Dictionary<string, object>>(JsonConvert.SerializeObject(payloadData)) ?? new Dictionary<string, object>();
+                dict["apiKey"] = GasApiKey;
+                var content = new StringContent(JsonConvert.SerializeObject(dict), Encoding.UTF8, "application/json");
+                var res = await client.PostAsync(GasUrl, content);
+                return await res.Content.ReadAsStringAsync();
+            } catch { return "{}"; }
+        }
 
+        private static string FormatFallback(string funcName, string rawJson, dynamic args) {
+            if (funcName == "drive_search") {
+                var files = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(rawJson);
+                var sb = new StringBuilder("老師，我為您找到了以下檔案：\n\n");
+                foreach(var f in files) sb.AppendLine($"📄 **{f["name"]}**\n🔗 {f["url"]}\n");
+                return sb.ToString();
+            }
+            if (funcName == "calendar_list") {
+                var events = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(rawJson);
+                var sb = new StringBuilder("老師，您接下來的行程如下：\n\n");
+                foreach(var e in events) sb.AppendLine($"⏰ {e["start"]}\n📌 {e["summary"]}\n");
+                return sb.ToString();
+            }
+            if (funcName == "calendar_add") return $"我已完成 \"{args.summary}\" 行事曆新增。";
+            if (funcName == "add_lesson_note") return $"我已完成 \"{args.title}\" 教案記事新增。";
+            if (funcName == "gmail_send") return $"我已寄出 \"{args.subject}\" 的郵件。";
+            return $"動作已執行成功！內容如下：\n{rawJson}";
+        }
+    }
 
-        [HttpPost] [Route("api/LineBotOpenAIWebHook")]
-        public async Task<IActionResult> POST()
-{
-    try
-    {
-        this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
-        var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
-        if (lineEvent == null || lineEvent.type.ToLower() != "message" || lineEvent.message.type != "text") return Ok();
+    public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
+    {
+        [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
+        public IActionResult Get() => Ok("AI Google助手已經設定完成");
 
-        string userId = lineEvent.source.userId;
-        string userText = lineEvent.message.text;
+        [HttpPost] [Route("api/LineBotOpenAIWebHook")]
+        public async Task<IActionResult> POST()
+        {
+            try
+            {
+                this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
+                var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
+                if (lineEvent == null || lineEvent.type.ToLower() != "message" || lineEvent.message.type != "text") return Ok();
 
-        // --- 加速關鍵：並行處理 ---
-        var usageTask = BotService.CallGasAsync(new { action = "usage_increment", userId = userId });
-        
-        // 啟動 Loading 動畫 (不等待)
-        _ = Task.Run(async () => {
-            using var client = new HttpClient();
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", this.ChannelAccessToken);
-            await client.PostAsync("https://api.line.me/v2/bot/chat/loading/start", 
-                new StringContent(JsonConvert.SerializeObject(new { chatId = userId, loadingSeconds = 15 }), Encoding.UTF8, "application/json"));
-        });
+                string userId = lineEvent.source.userId;
+                string userText = lineEvent.message.text;
 
-        // 取得 Gemini 回應 (這內部會處理 Function Calling 並回傳最終文字)
-        string aiResponse = await BotService.GetGeminiResponseAsync(userId, userText);
+                var usageResJson = await BotService.CallGasAsync(new { action = "usage_increment", userId = userId });
+                dynamic? usageRes = JsonConvert.DeserializeObject(usageResJson);
+                int currentCount = usageRes?.count ?? 0;
 
-        // 等待使用量計算完成
-        dynamic? usageRes = JsonConvert.DeserializeObject(await usageTask);
-        int count = usageRes?.count ?? 0;
+                _ = Task.Run(async () => {
+                    using var client = new HttpClient();
+                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", this.ChannelAccessToken);
+                    await client.PostAsync("https://api.line.me/v2/bot/chat/loading/start", 
+                        new StringContent(JsonConvert.SerializeObject(new { chatId = userId, loadingSeconds = 20 }), Encoding.UTF8, "application/json"));
+                });
 
-        // --- 修正點：確保對話紀錄與工具執行結果都被存檔 ---
-        _ = BotService.CallGasAsync(new { 
-            action = "sheets_append", 
-            userId = userId, 
-            userText = userText, 
-            aiResponse = aiResponse, 
-            count = count 
-        });
+                string aiResponse = await BotService.GetGeminiResponseAsync(userId, userText);
 
-        this.ReplyMessage(lineEvent.replyToken, $"{aiResponse}\n\n使用量：{count}/500");
-        return Ok();
-    }
-    catch (Exception ex) {
-        Console.WriteLine($"Error: {ex.Message}");
-        return Ok(); }
-        }
-    }
+                _ = BotService.CallGasAsync(new { action = "sheets_append", userId = userId, userText = userText, aiResponse = aiResponse, count = currentCount });
+
+                this.ReplyMessage(lineEvent.replyToken, $"{aiResponse}\n\n使用量：{currentCount}/500");
+                return Ok();
+            }
+            catch (Exception ex) { Console.WriteLine(ex.Message); return Ok(); }
+        }
+    }
 }
