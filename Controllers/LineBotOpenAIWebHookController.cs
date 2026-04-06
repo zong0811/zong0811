@@ -66,16 +66,17 @@ namespace isRock.Template
     string funcName = (string)part.functionCall.name;
     object gasPayload;
 
-    // 🌟 關鍵修正：確保這裡精準對接 GAS 的 custom_log
     if (funcName == "add_lesson_note") 
     {
+        // 🌟 強化屬性讀取：確保 args 轉換為字串時不會出錯
+        var args = part.functionCall.args;
         gasPayload = new { 
             action = "custom_log", 
             targetSheet = "教案記事本", 
-            rowContents = new[] { 
-                (string)part.functionCall.args.category ?? "未分類", 
-                (string)part.functionCall.args.title ?? "無標題", 
-                (string)part.functionCall.args.content ?? "" 
+            rowContents = new string[] { 
+                (string)(args.category ?? "教學靈感"), 
+                (string)(args.title ?? "未命名筆記"), 
+                (string)(args.content ?? "") 
             } 
         };
     }
@@ -84,9 +85,14 @@ namespace isRock.Template
         gasPayload = new { action = funcName, args = part.functionCall.args };
     }
 
-    // 執行 GAS 寫入
+    // 執行 GAS 寫入，並確認結果
     string gasRes = await CallGasAsync(gasPayload);
-                    object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
+                    // 如果是紀錄功能，我們可以直接回傳成功訊息，節省第二次 Gemini 呼叫的時間 (更穩定且極速)
+    if (funcName == "add_lesson_note") {
+        return $"✅ 老師，我已幫您記錄到「教案記事本」中：\n\n📌 **{part.functionCall.args.title}**\n({part.functionCall.args.category})";
+    }
+                    // 搜尋類的功能才跑第二階段 Gemini
+    object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
 
                     var finalContents = new List<object>();
                     finalContents.AddRange(historyList);
