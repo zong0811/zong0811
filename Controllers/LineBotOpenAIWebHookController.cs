@@ -62,13 +62,30 @@ namespace isRock.Template
 
                 // 4. 第二階段：處理 Function Calling
                 if (part?.functionCall != null)
-                {
-                    string funcName = (string)part.functionCall.name;
-                    object gasPayload = (funcName == "add_lesson_note") ? 
-                        new { action = "custom_log", targetSheet = "教案記事本", rowContents = new[] { (string)part.functionCall.args.category, (string)part.functionCall.args.title, (string)part.functionCall.args.content } } :
-                        new { action = funcName, args = part.functionCall.args };
+{
+    string funcName = (string)part.functionCall.name;
+    object gasPayload;
 
-                    string gasRes = await CallGasAsync(gasPayload);
+    // 🌟 關鍵修正：確保這裡精準對接 GAS 的 custom_log
+    if (funcName == "add_lesson_note") 
+    {
+        gasPayload = new { 
+            action = "custom_log", 
+            targetSheet = "教案記事本", 
+            rowContents = new[] { 
+                (string)part.functionCall.args.category ?? "未分類", 
+                (string)part.functionCall.args.title ?? "無標題", 
+                (string)part.functionCall.args.content ?? "" 
+            } 
+        };
+    }
+    else 
+    {
+        gasPayload = new { action = funcName, args = part.functionCall.args };
+    }
+
+    // 執行 GAS 寫入
+    string gasRes = await CallGasAsync(gasPayload);
                     object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
 
                     var finalContents = new List<object>();
