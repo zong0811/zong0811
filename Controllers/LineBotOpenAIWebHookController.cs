@@ -35,7 +35,7 @@ namespace isRock.Template
                         new { name = "calendar_list", description = "查詢接下來一週的行程" },
                         new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string", description = "格式務必為: yyyy-MM-ddTHH:mm:ss+08:00" }, endTime = new { type = "string", description = "格式務必為: yyyy-MM-ddTHH:mm:ss+08:00" } }, required = new[] { "summary", "startTime", "endTime" } } },
                         new { name = "gmail_send", description = "直接寄出郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
-                        new { name = "add_lesson_note", description = "記錄教案筆記", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
+                        new { name = "add_lesson_note", description = "當老師提到『記一下』、『紀錄筆記』、『課堂觀察』或任何教案靈感、學生表現、教學心得時，務必調用此工具存入試算表。", parameters = new {type = "object", properties = new {category = new { type = "string", description = "課程分類，如：體育、語文、導師時間" },title = new { type = "string", description = "自動生成一個 10 字以內的精簡標題" }, content = new { type = "string", description = "詳細的觀察內容或靈感描述" }}, required = new[] { "category", "title", "content" }}}
                     } }
                 };
 
