@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.Concurrent;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -11,198 +10,160 @@ using Newtonsoft.Json;
 
 namespace isRock.Template
 {
-    // --- 1. 使用量管理員 (每日 500 次，15:00 重置) ---
-    public static class UsageManager
-    {
-        private static int _todayCount = 0;
-        private static DateTime _nextResetTime = GetNextResetTime();
-        private static readonly object _lock = new object();
+    // --- 服務層：負責所有對外 API 溝通 ---
+    public static class BotService
+    {
+        private static string GeminiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
+        private static string GasUrl => Environment.GetEnvironmentVariable("GAS_WEB_APP_URL") ?? "";
+        private static string GasApiKey => Environment.GetEnvironmentVariable("GAS_API_KEY") ?? "";
 
-        private static DateTime GetNextResetTime()
-        {
-            DateTime now = DateTime.UtcNow.AddHours(8); 
-            DateTime resetToday = new DateTime(now.Year, now.Month, now.Day, 15, 0, 0);
-            return now < resetToday ? resetToday : resetToday.AddDays(1);
-        }
+        public static async Task<string> GetGeminiResponseAsync(string userId, string userQuery)
+{
+    try {
+        using var client = new HttpClient();
+        string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
+        string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
-        public static int GetAndIncrementCount(out bool isOverLimit)
-        {
-            lock (_lock)
-            {
-                if (DateTime.UtcNow.AddHours(8) >= _nextResetTime)
-                {
-                    _todayCount = 0;
-                    _nextResetTime = GetNextResetTime();
-                }
-                isOverLimit = _todayCount >= 500;
-                if (!isOverLimit) _todayCount++;
-                return _todayCount;
-            }
-        }
-    }
+        // 1. 關鍵步驟：從 GAS 讀取持久化記憶
+        string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
+        var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
 
-    // --- 2. 對話歷史管理員 (記憶 5 輪) ---
-    public static class ChatHistoryManager
-    {
-        private static readonly ConcurrentDictionary<string, List<object>> _history = new ConcurrentDictionary<string, List<object>>();
-        private const int MaxHistory = 5; 
+        // 2. 建立動態內容陣列
+        var contents = new List<object>();
+        contents.AddRange(historyList); // 加入過去的對話紀錄
+        contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } }); // 加入當下的提問
 
-        public static List<object> GetHistory(string userId)
-        {
-            return _history.GetOrAdd(userId, _ => new List<object>());
-        }
+        var tools = new object[] {
+            new { function_declarations = new object[] { 
+                new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
+                new { name = "calendar_list", description = "查詢接下來一週的行程" },
+                new { name = "calendar_add", description = "新增日曆行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string" }, endTime = new { type = "string" } }, required = new[] { "summary", "startTime", "endTime" } } },
+                new { name = "gmail_send", description = "直接寄出 Gmail 郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
+                new { name = "add_lesson_note", description = "記錄教案筆記", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
+            } }
+        };
 
-        public static void AddMessage(string userId, string role, string content)
-        {
-            var userHistory = GetHistory(userId);
-            string geminiRole = role.ToLower() == "assistant" ? "model" : "user";
-            userHistory.Add(new { role = geminiRole, parts = new[] { new { text = content } } });
-            if (userHistory.Count > (MaxHistory * 2)) userHistory.RemoveAt(0);
-        }
-    }
+        var requestBody = new {
+            contents = contents, // 使用包含記憶的內容
+            systemInstruction = new { 
+                parts = new[] { new { text = $"你是一位資深的教育人員。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣與使用者對話。" } } 
+            },
+            generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
+            tools = tools
+        };
 
-    // --- 3. 搜尋快取管理員 (30 分鐘) ---
-    public static class SearchCacheManager
-    {
-        private class CacheEntry { public string Result { get; set; } public DateTime ExpireTime { get; set; } }
-        private static readonly ConcurrentDictionary<string, CacheEntry> _searchCache = new ConcurrentDictionary<string, CacheEntry>();
+                var res = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json"));
+                var resStr = await res.Content.ReadAsStringAsync();
+                dynamic? result = JsonConvert.DeserializeObject(resStr);
+                
+                var part = result?.candidates?[0]?.content?.parts?[0];
 
-        public static bool TryGetCache(string query, out string result)
-        {
-            if (_searchCache.TryGetValue(query, out var entry))
-            {
-                if (DateTime.Now < entry.ExpireTime) { result = entry.Result; return true; }
-                _searchCache.TryRemove(query, out _);
-            }
-            result = null; return false;
-        }
+                if (part?.functionCall != null)
+                {
+                    string funcName = (string)part.functionCall.name;
+                    object gasPayload;
 
-        public static void SetCache(string query, string result)
-        {
-            _searchCache[query] = new CacheEntry { Result = result, ExpireTime = DateTime.Now.AddMinutes(30) };
-        }
-    }
+                    // 2. 邏輯判斷：如果是教案記事，則重新封裝給 GAS 的 custom_log
+                    if (funcName == "add_lesson_note") 
+                    { 
+                        gasPayload = new { 
+                            action = "custom_log", 
+                            targetSheet = "教案記事本", // 指定寫入的分頁 
+                            rowContents = new[] { 
+                                (string)part.functionCall.args.category, 
+                                (string)part.functionCall.args.title, 
+                                (string)part.functionCall.args.content 
+                            } 
+                        }; 
+                    }
+                    else 
+                    {
+                        gasPayload = new { action = funcName, args = part.functionCall.args };
+                    }
 
-    // --- 4. 動畫管理員 (控制 LINE Loading 三個點動畫) ---
-    public static class LoadingAnimationManager
-    {
-        public static async Task StartLoadingAsync(string accessToken, string chatId, int seconds = 20)
-        {
-            if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(chatId)) return;
+                    string gasRes = await CallGasAsync(gasPayload);
 
-            string url = "https://api.line.me/v2/bot/chat/loading/start";
-            var requestBody = new { chatId = chatId, loadingSeconds = seconds };
+                    object toolResultObject;
+                    try { toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { }; }
+                    catch { toolResultObject = new { raw_data = gasRes }; }
 
-            try
-            {
-                using var client = new HttpClient();
-                // 必須正確帶入 Bearer Token
-                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-                var content = new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json");
-                await client.PostAsync(url, content);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Loading Animation Error: {ex.Message}");
-            }
-        }
-    }
+                    var finalBody = new {
+                        contents = new object[] {
+                            new { role = "user", parts = new object[] { new { text = userQuery } } },
+                            new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } },
+                            new { role = "function", parts = new object[] { 
+                                new { functionResponse = new { name = funcName, response = new { content = toolResultObject } } } 
+                            } }
+                        }
+                    };
+                    var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
+                    dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
+                    return (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text ?? "動作已執行。";
+                }
+                return (string?)part?.text ?? "系統還在設定中...";
+            }
+            catch (Exception ex) { return $"系統異常：{ex.Message}"; }
+        }
 
-    // --- 5. Gemini 服務 (Token 統計 + 台灣時間) ---
-    public static class GeminiLLM
-    {
-        private static string ApiKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
-        private const string ModelName = "gemini-3.1-flash-lite-preview";
+        public static async Task<string> CallGasAsync(object payloadData)
+        {
+            try {
+                using var client = new HttpClient();
+                string json = JsonConvert.SerializeObject(payloadData);
+                var dict = JsonConvert.DeserializeObject<Dictionary<string, object>>(json) ?? new Dictionary<string, object>();
+                dict["apiKey"] = GasApiKey;
 
-        public static async Task<(string text, int tokens)> GetResponseAsync(string userId, string userQuery)
-        {
-            if (SearchCacheManager.TryGetCache(userQuery, out string cachedResult))
-                return (cachedResult, 0);
+                var content = new StringContent(JsonConvert.SerializeObject(dict), Encoding.UTF8, "application/json");
+                var res = await client.PostAsync(GasUrl, content);
+                return await res.Content.ReadAsStringAsync();
+            } catch { return "{}"; }
+        }
+    }
 
-            string url = $"https://generativelanguage.googleapis.com/v1beta/models/{ModelName}:generateContent?key={ApiKey}";
-            string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
-
-            var requestBody = new {
-                contents = ChatHistoryManager.GetHistory(userId),
-                systemInstruction = new { 
-                    parts = new[] { new { 
-                        text = $"你是一位資深的教育人員。現在是台灣時間 {currentTimeInfo}。請用溫柔而堅定的語氣與使用者對話。" 
-                    } } 
-                },
-                generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 }
-            };
-
-            try 
-            {
-                using var client = new HttpClient();
-                var content = new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json");
-                var response = await client.PostAsync(url, content);
-                var jsonResponse = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode) return ("導師正在沉思，請稍後再試。", 0);
-
-                dynamic? result = JsonConvert.DeserializeObject(jsonResponse);
-                string textResult = result?.candidates?[0]?.content?.parts?[0]?.text ?? "我看見了光。";
-                int totalTokens = result?.usageMetadata?.totalTokenCount ?? 0;
-
-                SearchCacheManager.SetCache(userQuery, textResult);
-                return (textResult, totalTokens);
-            }
-            catch (Exception) { return ("導師暫時切斷了與外界的聯繫。", 0); }
-        }
-    }
-
-    // --- 6. LINE WebHook 控制器 ---
-    public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
-    {
+    public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
+    {
+        // 🌟 建議加在這裡：這讓瀏覽器或測試工具可以直接透過 GET 存取這個網址
         [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
-        public IActionResult Get() => Ok("Bot is Alive!");
+        public IActionResult Get() => Ok("Bot is Alive!");        
+        [HttpPost] [Route("api/LineBotOpenAIWebHook")]
+        public async Task<IActionResult> POST()
+        {
+            try
+            {
+                this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
+                var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
+                if (lineEvent == null || lineEvent.type.ToLower() != "message" || lineEvent.message.type != "text") return Ok();
 
-        [Route("api/LineBotOpenAIWebHook")]
-        [HttpPost]
-        public async Task<IActionResult> POST()
-        {
-            try
-            {
-                this.ChannelAccessToken = Environment.GetEnvironmentVariable("LINE_CHANNEL_TOKEN");
-                var lineEvent = this.ReceivedMessage?.events?.FirstOrDefault();
-                
-                // 基本檢查：確保有收到訊息且有 replyToken
-                if (lineEvent == null || string.IsNullOrEmpty(lineEvent.replyToken)) return Ok();
+                string userId = lineEvent.source.userId;
+                string userText = lineEvent.message.text;
+                string replyToken = lineEvent.replyToken;
 
-                if (lineEvent.type.ToLower() == "message" && lineEvent.message.type == "text")
-                {
-                    string userId = lineEvent.source.userId;
-                    string userText = lineEvent.message.text;
+                var usageResJson = await BotService.CallGasAsync(new { action = "usage_increment", userId = userId });
+                dynamic? usageRes = JsonConvert.DeserializeObject(usageResJson);
+                int currentCount = usageRes?.count ?? 0;
 
-                    // 步驟 A: 檢查配額
-                    int currentCount = UsageManager.GetAndIncrementCount(out bool isOverLimit);
-                    if (isOverLimit) {
-                        this.ReplyMessage(lineEvent.replyToken, "🌟 今日配額已滿。");
-                        return Ok();
-                    }
+                if ((bool?)(usageRes?.isOverLimit) ?? false) {
+                    this.ReplyMessage(replyToken, "🌟 今日配額已滿。");
+                    return Ok();
+                }
 
-                    // 步驟 B: 啟動動畫 (不使用 await，直接背景執行)
-                    _ = LoadingAnimationManager.StartLoadingAsync(this.ChannelAccessToken, userId);
+                _ = Task.Run(async () => {
+                    using var client = new HttpClient();
+                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", this.ChannelAccessToken);
+                    await client.PostAsync("https://api.line.me/v2/bot/chat/loading/start", 
+                        new StringContent(JsonConvert.SerializeObject(new { chatId = userId, loadingSeconds = 20 }), Encoding.UTF8, "application/json"));
+                });
 
-                    // 步驟 C: 紀錄歷史並呼叫 AI
-                    ChatHistoryManager.AddMessage(userId, "user", userText);
-                    var (responseMsg, totalTokens) = await GeminiLLM.GetResponseAsync(userId, userText);
-                    ChatHistoryManager.AddMessage(userId, "assistant", responseMsg);
+                string aiResponse = await BotService.GetGeminiResponseAsync(userId, userText);
 
-                    // 步驟 D: 組合訊息與回覆 (回覆後動畫會自動停止)
-                    string tokenInfo = totalTokens > 0 ? $"總計消耗：{totalTokens} tokens" : "（來自快取）";
-                    string finalReply = $"{responseMsg}\n\n次數：{currentCount}/500\n{tokenInfo}";
+                _ = BotService.CallGasAsync(new { 
+                    action = "sheets_append", userId = userId, userText = userText, aiResponse = aiResponse, count = currentCount
+                });
 
-                    this.ReplyMessage(lineEvent.replyToken, finalReply);
-                }
-                return Ok();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.ToString());
-                return Ok();
-            }
-        }
-    }
+                this.ReplyMessage(replyToken, $"{aiResponse}\n\n使用量：{currentCount}/500");
+                return Ok();
+            }
+            catch (Exception ex) { Console.WriteLine(ex.Message); return Ok(); }
+        }
+    }
 }
