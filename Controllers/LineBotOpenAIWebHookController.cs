@@ -20,7 +20,7 @@ namespace isRock.Template
         {
             try {
                 using var client = new HttpClient();
-                // 🌟 使用您指定的 3.1 預覽版模型
+                // 🌟 維持使用您指定的 3.1 預覽版模型
                 string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
                 string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
@@ -44,17 +44,15 @@ namespace isRock.Template
                 contents.AddRange(historyList);
                 contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
 
-                // 🌟 強化指令：要求 AI 使用特定格式回覆
-                string systemPrompt = $"你是一位專業教育助理。現在時間 {currentTimeInfo}。請遵守回覆規範：\n" +
-                                     "1. 行事曆新增後必說：我已完成 \"[事項名稱]\" 行事曆新增。\n" +
-                                     "2. 教案記事新增後必說：我已完成 \"[標題]\" 教案記事新增。\n" +
-                                     "3. 寄信後必說：我已寄出 \"[主旨]\" 的郵件。\n" +
-                                     "4. 搜尋檔案必列出：\"[檔案名稱]\" 及其下載網址清單。";
+                string systemPrompt = $"你是一位專業教育助理。現在時間 {currentTimeInfo}。\n" +
+                                     "1. 行事曆新增後：我已完成 \"[事項名稱]\" 行事曆新增。\n" +
+                                     "2. 教案記事新增後：我已完成 \"[標題]\" 教案記事新增。\n" +
+                                     "3. 寄信後：我已寄出 \"[主旨]\" 的郵件。\n" +
+                                     "4. 收到搜尋結果時，請務必詳細列出名稱與連結，不要只說已完成。";
 
                 var requestBody = new {
                     contents = contents,
                     systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
-                    generationConfig = new { maxOutputTokens = 1500, temperature = 0.5 },
                     tools = tools
                 };
 
@@ -62,7 +60,7 @@ namespace isRock.Template
                 dynamic? result = JsonConvert.DeserializeObject(await res.Content.ReadAsStringAsync());
                 var part = result?.candidates?[0]?.content?.parts?[0];
 
-                // 4. 第二階段：處理執行結果
+                // 4. 處理工具執行
                 if (part?.functionCall != null)
                 {
                     string funcName = (string)part.functionCall.name;
@@ -71,14 +69,24 @@ namespace isRock.Template
                         new { action = funcName, args = part.functionCall.args };
 
                     string gasRes = await CallGasAsync(gasPayload);
-                    object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { raw_data = gasRes };
+                    
+                    // 🌟 修正點：確保資料被正確封裝
+                    object toolResultObject;
+                    try {
+                        var parsed = JsonConvert.DeserializeObject(gasRes);
+                        toolResultObject = new { content = parsed }; // 將結果包在 content 欄位中，AI 較易讀取
+                    } catch {
+                        toolResultObject = new { content = gasRes };
+                    }
 
                     // 構建完整對話鏈
                     var finalContents = new List<object>();
                     finalContents.AddRange(historyList);
                     finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
                     finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } });
-                    finalContents.Add(new { role = "function", parts = new object[] { new { functionResponse = new { name = funcName, response = toolResultObject } } } });
+                    finalContents.Add(new { role = "function", parts = new object[] { 
+                        new { functionResponse = new { name = funcName, response = toolResultObject } } 
+                    } });
 
                     var finalBody = new {
                         contents = finalContents,
@@ -86,15 +94,16 @@ namespace isRock.Template
                         tools = tools
                     };
 
-                    // 🌟 修正點：必須讀取 finalRes 而不是 res
                     var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
                     var finalResStr = await finalRes.Content.ReadAsStringAsync();
                     dynamic? finalJson = JsonConvert.DeserializeObject(finalResStr);
-                    
                     string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
 
-                    // 如果 AI 還是沒吐出文字，根據動作類型強制產生回饋
+                    // 🌟 雙重保險：如果 AI 斷片沒回傳文字，我們根據資料類型手動產生回覆
                     if (string.IsNullOrEmpty(aiText)) {
+                        if (funcName == "calendar_list" || funcName == "drive_search") {
+                            return $"老師，我已經幫您找到相關資料了，內容如下：\n{gasRes}";
+                        }
                         if (funcName == "calendar_add") return $"我已完成 \"{part.functionCall.args.summary}\" 行事曆新增。";
                         if (funcName == "add_lesson_note") return $"我已完成 \"{part.functionCall.args.title}\" 教案記事新增。";
                         if (funcName == "gmail_send") return $"我已寄出 \"{part.functionCall.args.subject}\" 的郵件。";
@@ -103,7 +112,7 @@ namespace isRock.Template
                     return aiText ?? "動作已執行，請檢查相關內容。";
                 }
 
-                return (string?)part?.text ?? "導師正在為您準備...";
+                return (string?)part?.text ?? "AI正在為您準備...";
             }
             catch (Exception ex) { return $"系統異常：{ex.Message}"; }
         }
@@ -124,7 +133,7 @@ namespace isRock.Template
     public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
     {
         [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
-        public IActionResult Get() => Ok("Bot is Alive! 2026/04/06");
+        public IActionResult Get() => Ok("Bot is Alive! 04/06");
 
         [HttpPost] [Route("api/LineBotOpenAIWebHook")]
         public async Task<IActionResult> POST()
