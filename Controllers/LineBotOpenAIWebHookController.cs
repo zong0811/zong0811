@@ -68,46 +68,47 @@ namespace isRock.Template
 
                 // 4. 第二階段：處理 Function Calling
                 if (part?.functionCall != null)
-                {
-                    string funcName = (string)part.functionCall.name;
-                    object gasPayload = (funcName == "add_lesson_note") ? 
-                        new { action = "custom_log", targetSheet = "教案記事本", rowContents = new[] { (string)part.functionCall.args.category, (string)part.functionCall.args.title, (string)part.functionCall.args.content } } :
-                        new { action = funcName, args = part.functionCall.args };
+        {
+            string funcName = (string)part.functionCall.name;
+            object gasPayload = (funcName == "add_lesson_note") ? 
+                new { action = "custom_log", targetSheet = "教案記事本", rowContents = new[] { (string)part.functionCall.args.category, (string)part.functionCall.args.title, (string)part.functionCall.args.content } } :
+                new { action = funcName, args = part.functionCall.args };
 
-                    string gasRes = await CallGasAsync(gasPayload);
-                    object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
+            string gasRes = await CallGasAsync(gasPayload);
+            
+            // 🌟 關鍵修正：將 JSON 字串解析為物件，讓 AI 能直接讀取結構
+            object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
 
-                    // 構建完整對話鏈
-                    var finalContents = new List<object>();
-                    finalContents.AddRange(historyList);
-                    finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
-                    finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } });
-                    finalContents.Add(new { role = "function", parts = new object[] { 
-                        new { functionResponse = new { name = funcName, response = toolResultObject } } 
-                    } });
+            var finalContents = new List<object>();
+            finalContents.AddRange(historyList);
+            finalContents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
+            finalContents.Add(new { role = "model", parts = new object[] { new { functionCall = part.functionCall } } });
+            finalContents.Add(new { role = "function", parts = new object[] { 
+                new { functionResponse = new { name = funcName, response = toolResultObject } } 
+            } });
 
-                    var finalBody = new {
-                        contents = finalContents,
-                        systemInstruction = requestBody.systemInstruction,
-                        // 🌟 第二次呼叫也要加入 Config 確保回覆品質
-                        generationConfig = new { maxOutputTokens = 1500, temperature = 0.7 },
-                        tools = tools
-                    };
+            var finalBody = new {
+                contents = finalContents,
+                systemInstruction = requestBody.systemInstruction,
+                tools = tools
+            };
 
-                    var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
-                    dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
-                    string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
+            var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
+            dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
+            string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
 
-                    // 備援排版機制
-                    if (string.IsNullOrEmpty(aiText)) return FormatFallback(funcName, gasRes, part.functionCall.args);
+            // 如果 AI 還是斷片，我們手動做一個基礎排版（最後一道防線）
+            if (string.IsNullOrEmpty(aiText)) {
+                return FormatFallback(funcName, gasRes, part.functionCall.args);
+            }
 
-                    return aiText;
-                }
+            return aiText;
+        }
 
-                return (string?)part?.text ?? "導師正在為您準備回覆...";
-            }
-            catch (Exception ex) { return $"系統連線狀況：{ex.Message}"; }
-        }
+        return (string?)part?.text ?? "導師正在為您準備...";
+    }
+    catch (Exception ex) { return $"系統異常：{ex.Message}"; }
+}
 
         public static async Task<string> CallGasAsync(object payloadData)
         {
