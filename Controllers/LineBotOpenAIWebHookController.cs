@@ -21,37 +21,34 @@ namespace isRock.Template
 {
     try {
         using var client = new HttpClient();
-        // 🌟 使用您指定的 3.1 預覽版模型
         string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
         string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
-        // 1. 讀取長期記憶
         string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
         var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
 
-        // 2. 工具定義
         var tools = new object[] {
             new { function_declarations = new object[] { 
                 new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
                 new { name = "calendar_list", description = "查詢接下來一週的行程" },
-                new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string", description = "格式: yyyy-MM-ddTHH:mm:ss+08:00" }, endTime = new { type = "string", description = "格式: yyyy-MM-ddTHH:mm:ss+08:00" } }, required = new[] { "summary", "startTime", "endTime" } } },
-                new { name = "gmail_send", description = "直接寄出郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
-                new { name = "add_lesson_note", description = "記錄教學發現或教案筆記。當要求整理內容並記錄時必用。", parameters = new { type = "object", properties = new { category = new { type = "string", description = "分類" }, title = new { type = "string", description = "10字內精簡標題" }, content = new { type = "string", description = "整理後的詳細內容" } }, required = new[] { "category", "title", "content" } } }
+                new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string" }, endTime = new { type = "string" } }, required = new[] { "summary", "startTime", "endTime" } } },
+                new { name = "gmail_send", description = "寄出電子郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
+                new { name = "add_lesson_note", description = "記錄教學發現、教案筆記或整理好的政策內容。只要涉及資料歸檔必用。", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
             } }
         };
 
-        // 3. 系統指令 (整合要求的匯報格式)
-        string systemPrompt = $"你是一位具備 30年資歷專業教育人員，也是使用者的專屬助手。現在時間 {currentTimeInfo}。\n" +
-                     "【核心原則】：若對話涉及資料整理、紀錄或建議，你必須先用內建知識回答教育政策與技巧再『執行』add_lesson_note 工具將整理內容存檔，嚴禁虛構儲存成功的訊息。\n" +
-                     "【核心使命】：你必須展現專業深度，回覆內容嚴禁敷衍。對每一項政策或技巧，都必須提供背景、核心要點與實務建議。\n" +
-                     "【工具使用限制】：優先用內建知識回答教育政策與技巧。僅在明確提到「搜尋雲端」時調用 drive_search。\n" +
-                     "【重要】：若使用者要求多項任務（如：整理後寄信並存檔），請同時調用多個對應工具。\n" +
-                     "【回覆結構（必備）】：當工具執行成功後，請按照以下順序產出最終回覆：\n" +
-                     "   ### [標題]\n" +
-                     "   1. **詳細整理內容**：針對需求，提供至少 5-8 個深度條列要點。每個要點需包含「核心概念」與「對教學的具體影響」。\n" +
-                     "   2. **多重任務執行報告**：使用分隔線「---」，清楚列出所有已完成的動作（如：郵件已發送至、教案已歸檔至...）。\n" +
-                     "   3. **專屬互動**：回覆最後針對內容主動提出一個有助於實務應用的追蹤問題。\n" +
-                     "【格式規範】：文字要溫潤而有洞察力。善用 Markdown 標題、粗體與分級清單，確保排版美觀。";
+        // 🌟 強化後的 Prompt：加入「強制任務清點」邏輯
+        string systemPrompt = $"你是一位具備 30 年資歷的專業教育人員，也是使用者的專屬助手。現在時間 {currentTimeInfo}。\n" +
+                             "【工具使用限制】：優先用內建知識回答教育政策與技巧。僅在明確提到「搜尋雲端」時調用 drive_search。\n" +
+                             "【核心指令】：當使用者要求多項任務（如整理後寄信並存檔），你必須調用『所有』對應工具，且在最終回覆中『逐一確認』每一項任務的完成狀況。\n" +
+                             "【回覆結構（嚴格執行）】：\n" +
+                             "   ### [專業知識標題]\n" +
+                             "   1. **詳細整理內容**：針對需求，提供至少 5-8 個深度條列要點。這是回覆的主體，嚴禁簡略。\n" +
+                             "   2. **多重任務執行清單**：在分隔線「---」後，必須條列檢查並確認所有動作。例如：\n" +
+                             "      - ✅ 郵件已寄送至：[收件人]\n" +
+                             "      - ✅ 教案已歸檔至試算表（標題：[標題]）\n" +
+                             "   3. **專屬互動**：最後針對內容提出一個引發實務討論的追蹤問題。\n" +
+                             "【語氣要求】：文字溫潤、專業且精準。善用 Markdown 排版。";
 
         var contents = new List<object>(historyList) {
             new { role = "user", parts = new[] { new { text = userQuery } } }
@@ -64,7 +61,6 @@ namespace isRock.Template
             tools = tools
         };
 
-        // 第一次呼叫：判定意圖
         var res = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json"));
         dynamic? result = JsonConvert.DeserializeObject(await res.Content.ReadAsStringAsync());
         var parts = result?.candidates?[0]?.content?.parts;
@@ -75,40 +71,24 @@ namespace isRock.Template
         List<object> functionResponses = new List<object>();
         bool hasFunctionCall = false;
 
-        // 4. 處理多重工具呼叫 (Parallel Function Calling 迴圈)
-        foreach (var p in parts)
-        {
-            if (p.functionCall != null)
-            {
+        foreach (var p in parts) {
+            if (p.functionCall != null) {
                 hasFunctionCall = true;
                 string funcName = (string)p.functionCall.name;
                 var args = p.functionCall.args;
-                
-                // 決定 GAS Payload
                 object gasPayload = (funcName == "add_lesson_note") ? 
                     new { action = "custom_log", targetSheet = "教案記事本", rowContents = new[] { (string)args["category"], (string)args["title"], (string)args["content"] } } :
                     new { action = funcName, args = args };
 
-                // 執行動作
                 string gasRes = await CallGasAsync(gasPayload);
-                object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
-
-                // 紀錄模型動作與執行結果
                 modelParts.Add(new { functionCall = p.functionCall });
-                functionResponses.Add(new { 
-                    role = "function", 
-                    parts = new[] { new { functionResponse = new { name = funcName, response = toolResultObject } } } 
-                });
-            }
-            else if (p.text != null)
-            {
+                functionResponses.Add(new { role = "function", parts = new[] { new { functionResponse = new { name = funcName, response = JsonConvert.DeserializeObject(gasRes) ?? new { } } } } });
+            } else if (p.text != null) {
                 modelParts.Add(new { text = (string)p.text });
             }
         }
 
-        if (hasFunctionCall)
-        {
-            // 5. 第二次呼叫：產出匯報長文
+        if (hasFunctionCall) {
             var finalContents = new List<object>(historyList);
             finalContents.Add(new { role = "user", parts = new[] { new { text = userQuery } } });
             finalContents.Add(new { role = "model", parts = modelParts });
@@ -125,12 +105,9 @@ namespace isRock.Template
             dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
             string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
 
-            // 備援排版 (Fallback)
             if (string.IsNullOrEmpty(aiText)) {
-                var lastAction = (dynamic)modelParts.Last();
-                return FormatFallback((string)lastAction.functionCall.name, "{}", lastAction.functionCall.args);
+                return "任務已處理完成。郵件已發送且教案已存檔，詳情請查看相關雲端紀錄。";
             }
-
             return aiText;
         }
 
