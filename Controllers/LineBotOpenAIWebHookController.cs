@@ -103,7 +103,7 @@ namespace isRock.Template
 
                     // 🌟 智慧型 Fallback：如果 AI 斷片沒回覆，我們手動清點所有動作
                     if (string.IsNullOrEmpty(aiText)) {
-                        StringBuilder sb = new StringBuilder("宗志老師，所有任務皆已處理完成。報告如下：\n\n");
+                        StringBuilder sb = new StringBuilder("所有任務皆已處理完成。報告如下：\n\n");
                         foreach(dynamic mp in modelParts) {
                             string name = mp.functionCall.name;
                             sb.AppendLine($"✅ 已執行動作：{name}");
