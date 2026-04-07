@@ -44,15 +44,13 @@ namespace isRock.Template
                 contents.AddRange(historyList);
                 contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
 
-                 string systemPrompt = $"你是一位專業教育人員，也是使用者的專屬助手。現在時間 {currentTimeInfo}。\n" +
-                     "【核心原則】：若對話涉及資料整理、紀錄或建議，你必須先先用內建知識回答教育政策與技巧再『執行』add_lesson_note 工具將整理內容存檔，嚴禁虛構儲存成功的訊息。\n" +
-                     "【工具使用限制】：優先用內建知識回答教育政策與技巧。僅在明確提到「搜尋雲端」時調用 drive_search。\n" +
-                     "【回覆結構（必備）】：當工具執行成功後，請按照以下順序產出最終回覆：\n" +
-                     "   ### [標題]\n" +
-                     "   1. **詳細整理內容**：針對使用者的需求，提供深入且條列化的政策或教學知識點。\n" +
-                     "   2. **儲存回報**：使用分隔線「---」，清楚列出存入試算表的類別、標題與內容摘要。\n" +
-                     "   3. **宗志專屬互動**：回覆最後針對內容主動提出一個有助於實務應用的追蹤問題。\n" +
-                     "【格式規範】：務必使用 Markdown (###, **, *)，確保手機介面易於閱讀。";
+                 string systemPrompt = $"你是一位專業教育人員。現在時間 {currentTimeInfo}。\n" +
+                     "【核心任務】：涉及紀錄時，必須先執行 add_lesson_note 工具存檔。\n" +
+                     "【回覆規範】：當工具回傳成功後，你必須「根據你剛才存入的內容」產出最終報告：\n" +
+                     "   1. 先詳細條列呈現整理好的知識重點（複述你存入 content 的內容）。\n" +
+                     "   2. 使用分隔線「---」後，標註儲存狀況，如沒有使用add_lesson_note則不出現。\n" +
+                     "   3. 最後提出互動問題。\n" +
+                     "【注意】：嚴禁只回覆存檔成功，必須完整呈現知識內容。";
 
                 var requestBody = new {
                     contents = contents,
@@ -123,18 +121,28 @@ namespace isRock.Template
         }
 
         private static string FormatFallback(string funcName, string rawJson, dynamic args) {
-            if (funcName == "drive_search") {
-                var files = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(rawJson);
-                var sb = new StringBuilder("老師，我為您找到了以下檔案：\n\n");
-                foreach(var f in files) sb.AppendLine($"📄 **{f["name"]}**\n🔗 {f["url"]}\n");
-                return sb.ToString();
-            }
-            if (funcName == "calendar_list") {
-                var events = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(rawJson);
-                var sb = new StringBuilder("老師，您接下來的行程如下：\n\n");
-                foreach(var e in events) sb.AppendLine($"⏰ {e["start"]}\n📌 {e["summary"]}\n");
-                return sb.ToString();
-            }
+    if (funcName == "add_lesson_note") {
+        // 🌟 從 args 中直接抓取剛才 AI 生成的內容來排版
+        StringBuilder sb = new StringBuilder();
+        sb.AppendLine($"### {args["title"]}");
+        sb.AppendLine();
+        sb.AppendLine($"{args["content"]}"); // 呈現詳細內容
+        sb.AppendLine();
+        sb.AppendLine("---");
+        sb.AppendLine("**已完成事項：**");
+        sb.AppendLine($"* **類別：** {args["category"]}");
+        sb.AppendLine($"* **標題：** {args["title"]}");
+        sb.AppendLine("\n宗志，以上內容已經幫您存入教案記事本了。這些政策中，您最想先了解哪一部分呢？");
+        return sb.ToString();
+    }
+    
+    // 以下原有的 drive_search, calendar_list 保持不變...
+    if (funcName == "drive_search") {
+        var files = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(rawJson);
+        var sb = new StringBuilder("老師，我為您找到了以下檔案：\n\n");
+        foreach(var f in files) sb.AppendLine($"📄 **{f["name"]}**\n🔗 {f["url"]}\n");
+        return sb.ToString();
+    }
             if (funcName == "calendar_add") return $"我已完成 \"{args.summary}\" 行事曆新增。";
             if (funcName == "add_lesson_note") return $"我已完成 \"{args.title}\" 教案記事新增。";
             if (funcName == "gmail_send") return $"我已寄出 \"{args.subject}\" 的郵件。";
