@@ -24,20 +24,26 @@ namespace isRock.Template
         string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
         string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
-        string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
-        var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
-
+        // 🌟 優化點 1：將「讀歷史」與「查配額」合併或並行處理
+        // 這裡暫時維持並行呼叫 GAS，節省等待時間
+        var historyTask = CallGasAsync(new { action = "get_chat_history", userId = userId });
+        
+        // 此處不需等歷史讀完，先準備工具定義
         var tools = new object[] {
             new { function_declarations = new object[] { 
-                new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
-                new { name = "calendar_list", description = "查詢接下來一週的行程" },
-                new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string" }, endTime = new { type = "string" } }, required = new[] { "summary", "startTime", "endTime" } } },
-                new { name = "gmail_send", description = "寄出電子郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
-                new { name = "add_lesson_note", description = "記錄教學發現、教案筆記或整理好的政策內容。只要涉及資料歸檔必用。", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
+                new { name = "drive_search", description = "搜尋檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } } } },
+                new { name = "calendar_list", description = "查詢行程" },
+                new { name = "calendar_add", description = "新增日曆", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string" }, endTime = new { type = "string" } }, required = new[] { "summary", "startTime", "endTime" } } },
+                new { name = "gmail_send", description = "寄信", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
+                new { name = "add_lesson_note", description = "記錄筆記。整理資料必用。", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
             } }
         };
 
-        // 🌟 強化後的 Prompt：加入「強制任務清點」邏輯
+        string historyJson = await historyTask; // 這時才等待歷史資料
+        var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
+
+        // 系統指令與第一次呼叫
+       // 🌟 強化後的 Prompt：加入「強制任務清點」邏輯
         string systemPrompt = $"你是一位具備 30 年資歷的專業教育人員，也是使用者的專屬助手。現在時間 {currentTimeInfo}。\n" +
                              "【工具使用限制】：優先用內建知識回答教育政策與技巧。僅在明確提到「搜尋雲端」時調用 drive_search。\n" +
                              "【核心指令】：當使用者要求多項任務（如整理後寄信並存檔），你必須調用『所有』對應工具，且在最終回覆中『逐一確認』每一項任務的完成狀況。\n" +
@@ -49,13 +55,9 @@ namespace isRock.Template
                              "      - ✅ 教案已歸檔至試算表（標題：[標題]）\n" +
                              "   3. **專屬互動**：最後針對內容提出一個引發實務討論的追蹤問題。\n" +
                              "【語氣要求】：文字溫潤、專業且精準。善用 Markdown 排版。";
-
-        var contents = new List<object>(historyList) {
-            new { role = "user", parts = new[] { new { text = userQuery } } }
-        };
-
+        
         var requestBody = new {
-            contents = contents,
+            contents = new List<object>(historyList) { new { role = "user", parts = new[] { new { text = userQuery } } } },
             systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
             generationConfig = new { maxOutputTokens = 2000, temperature = 0.7 },
             tools = tools
@@ -65,34 +67,46 @@ namespace isRock.Template
         dynamic? result = JsonConvert.DeserializeObject(await res.Content.ReadAsStringAsync());
         var parts = result?.candidates?[0]?.content?.parts;
 
-        if (parts == null) return "導師正在思考中...";
+        if (parts == null) return "導師正在準備中...";
 
-        List<object> modelParts = new List<object>();
-        List<object> functionResponses = new List<object>();
-        bool hasFunctionCall = false;
+        // 🌟 優化點 2：併發執行所有工具呼叫 (Parallel Execution)
+        var tasks = new List<Task<(object modelPart, object functionResponse)>>();
 
-        foreach (var p in parts) {
-            if (p.functionCall != null) {
-                hasFunctionCall = true;
+        foreach (var p in parts)
+        {
+            if (p.functionCall != null)
+            {
                 string funcName = (string)p.functionCall.name;
                 var args = p.functionCall.args;
-                object gasPayload = (funcName == "add_lesson_note") ? 
-                    new { action = "custom_log", targetSheet = "教案記事本", rowContents = new[] { (string)args["category"], (string)args["title"], (string)args["content"] } } :
-                    new { action = funcName, args = args };
+                
+                // 建立一個非同步任務但不立刻 await
+                tasks.Add(Task.Run(async () => {
+                    object gasPayload = (funcName == "add_lesson_note") ? 
+                        new { action = "custom_log", targetSheet = "教案記事本", rowContents = new[] { (string)args["category"], (string)args["title"], (string)args["content"] } } :
+                        new { action = funcName, args = args };
 
-                string gasRes = await CallGasAsync(gasPayload);
-                modelParts.Add(new { functionCall = p.functionCall });
-                functionResponses.Add(new { role = "function", parts = new[] { new { functionResponse = new { name = funcName, response = JsonConvert.DeserializeObject(gasRes) ?? new { } } } } });
-            } else if (p.text != null) {
-                modelParts.Add(new { text = (string)p.text });
+                    string gasRes = await CallGasAsync(gasPayload);
+                    object toolResultObject = JsonConvert.DeserializeObject(gasRes) ?? new { };
+
+                    return (
+                        modelPart: (object)new { functionCall = p.functionCall },
+                        functionResponse: (object)new { role = "function", parts = new[] { new { functionResponse = new { name = funcName, response = toolResultObject } } } }
+                    );
+                }));
             }
         }
 
-        if (hasFunctionCall) {
+        if (tasks.Count > 0)
+        {
+            // 🌟 同時啟動所有 GAS 連線
+            var taskResults = await Task.WhenAll(tasks);
+
             var finalContents = new List<object>(historyList);
             finalContents.Add(new { role = "user", parts = new[] { new { text = userQuery } } });
+            
+            var modelParts = taskResults.Select(r => r.modelPart).ToList();
             finalContents.Add(new { role = "model", parts = modelParts });
-            finalContents.AddRange(functionResponses);
+            finalContents.AddRange(taskResults.Select(r => r.functionResponse));
 
             var finalBody = new {
                 contents = finalContents,
@@ -103,17 +117,12 @@ namespace isRock.Template
 
             var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(finalBody), Encoding.UTF8, "application/json"));
             dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
-            string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
-
-            if (string.IsNullOrEmpty(aiText)) {
-                return "任務已處理完成。郵件已發送且教案已存檔，詳情請查看相關雲端紀錄。";
-            }
-            return aiText;
+            return (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text ?? "任務處理完畢。";
         }
 
-        return (string?)parts[0]?.text ?? "導師正在為您準備回覆...";
+        return (string?)parts[0]?.text ?? "正在回覆中...";
     }
-    catch (Exception ex) { return $"系統異常：{ex.Message}"; }
+    catch (Exception ex) { return $"連線狀況：{ex.Message}"; }
 }
 
         public static async Task<string> CallGasAsync(object payloadData)
