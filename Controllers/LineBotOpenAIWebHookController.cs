@@ -21,14 +21,15 @@ namespace isRock.Template
     try
     {
         using var client = new HttpClient();
-        string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GeminiKey}";
+        // Render 免費版建議使用 1.5-flash，反應速度最穩定
+        string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
         string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
-        // 1. 讀取長期記憶
+        // 1. 讀取長期記憶 (GAS)
         string historyJson = await CallGasAsync(new { action = "get_chat_history", userId = userId });
         var historyList = JsonConvert.DeserializeObject<List<object>>(historyJson) ?? new List<object>();
 
-        // 2. 工具定義
+        // 2. 定義功能工具
         var tools = new object[] {
             new { function_declarations = new object[] { 
                 new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
@@ -53,7 +54,7 @@ namespace isRock.Template
                              "【語氣要求】：文字溫潤、專業且精準。善用 Markdown 排版。";
 
 
-        // 3. 第一階段 AI 呼叫
+        // 4. 第一階段請求
         var firstBody = new {
             contents = new List<object>(historyList) { new { role = "user", parts = new[] { new { text = userQuery } } } },
             systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
@@ -61,9 +62,9 @@ namespace isRock.Template
             tools = tools
         };
 
-        var res = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(firstBody), Encoding.UTF8, "application/json"));
-        dynamic? result = JsonConvert.DeserializeObject(await res.Content.ReadAsStringAsync());
-        var parts = result?.candidates?[0]?.content?.parts;
+        var firstRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(firstBody), Encoding.UTF8, "application/json"));
+        dynamic? firstResult = JsonConvert.DeserializeObject(await firstRes.Content.ReadAsStringAsync());
+        var parts = firstResult?.candidates?[0]?.content?.parts;
 
         if (parts == null) return "導師正在思考中...";
 
@@ -73,14 +74,15 @@ namespace isRock.Template
         string cachedContent = ""; 
         string cachedTitle = "";
 
-        // 🌟 4. 並行任務處理 (使用 dynamic 避開型別轉換錯誤)
+        // 🌟 5. 並行任務處理 (關鍵修正：Task.Run<dynamic>)
         var gasTasks = new List<Task<dynamic>>();
 
         foreach (var p in parts) {
             if (p.functionCall != null) {
                 hasFunctionCall = true;
                 var currentP = p; 
-                gasTasks.Add(Task.Run(async () => {
+                // 這裡明確指定 Task.Run 的回傳值為 dynamic
+                gasTasks.Add(Task.Run<dynamic>(async () => {
                     string fName = (string)currentP.functionCall.name;
                     var fArgs = currentP.functionCall.args;
                     string tTitle = (fName == "add_lesson_note") ? (string)fArgs["title"] : "";
@@ -91,8 +93,6 @@ namespace isRock.Template
                         new { action = fName, args = fArgs };
 
                     string gRes = await CallGasAsync(payload);
-                    
-                    // 回傳匿名物件
                     return new {
                         mp = new { functionCall = currentP.functionCall },
                         fr = new { role = "function", parts = new[] { new { functionResponse = new { name = fName, response = JsonConvert.DeserializeObject(gRes) ?? new { } } } } },
@@ -100,10 +100,12 @@ namespace isRock.Template
                         cc = tContent
                     };
                 }));
-            } else if (p.text != null) { modelParts.Add(new { text = (string)p.text }); }
+            } else if (p.text != null) {
+                modelParts.Add(new { text = (string)p.text });
+            }
         }
 
-        // 5. 整合結果並回覆
+        // 6. 整合結果並回覆
         if (hasFunctionCall) {
             var taskResults = await Task.WhenAll(gasTasks);
             foreach (var r in taskResults) {
@@ -116,7 +118,7 @@ namespace isRock.Template
             finalContents.Add(new { role = "user", parts = new[] { new { text = userQuery } } });
             finalContents.Add(new { role = "model", parts = modelParts });
             finalContents.AddRange(functionResponses);
-            finalContents.Add(new { role = "user", parts = new[] { new { text = "請依照格式詳細彙報剛才處理的內容。" } } });
+            finalContents.Add(new { role = "user", parts = new[] { new { text = "請依照格式詳細彙報剛才處理的內容並整理資訊。" } } });
 
             var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(new { 
                 contents = finalContents, systemInstruction = new { parts = new[] { new { text = systemPrompt } } }, 
@@ -129,11 +131,11 @@ namespace isRock.Template
             return string.IsNullOrEmpty(aiText) ? FormatFallbackResponse(modelParts, functionResponses, cachedTitle, cachedContent) : aiText;
         }
 
-        return (string?)parts[0]?.text ?? "導師正在準備中...";
+        return (string?)parts[0]?.text ?? "導師正在思考中...";
     }
     catch (Exception ex) { return $"系統異常：{ex.Message}"; }
 
-    // 內部函數：備援回覆邏輯
+    // --- 內部輔助函數 ---
     string FormatFallbackResponse(List<object> mps, List<object> frs, string ct, string cc) {
         StringBuilder sb = new StringBuilder();
         if (!string.IsNullOrEmpty(cc)) sb.AppendLine($"### {ct}\n{cc}\n\n---");
