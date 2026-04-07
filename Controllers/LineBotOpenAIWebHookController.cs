@@ -152,7 +152,7 @@ namespace isRock.Template
                 if (fName == "calendar_list") {
                     var evts = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(json);
                     sb.AppendLine("📅 **本週行程清單：**");
-                    if (evts?.Count > 0) foreach(var e in evts) sb.AppendLine($"• 【{e["calendarName"]}】 {e["start"]} - {e["summary"]}");
+                    if (evts?.Count > 0) foreach(var e in evts) sb.AppendLine($"• {e["start"]} - {e["summary"]}");
                     else sb.AppendLine("（目前尚無行程）");
                 }
                 else if (fName == "drive_search") {
