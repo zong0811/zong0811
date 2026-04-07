@@ -44,7 +44,7 @@ namespace isRock.Template
                 contents.AddRange(historyList);
                 contents.Add(new { role = "user", parts = new object[] { new { text = userQuery } } });
 
-               string systemPrompt = $"你是一位專業教育助理。現在是台灣時間 {currentTimeInfo}。\n" +
+               string systemPrompt = $"你是一位專業教育人員。現在是台灣時間 {currentTimeInfo}。\n" +
                      "【核心規範】：若使用者要求『整理並記錄』，你必須遵循『先存後說』原則：\n" +
                      "1. 必須先調用 add_lesson_note 工具，將你整理好的『完整詳細內容』傳入 content 參數。\n" +
                      "2. 嚴禁在未執行工具前就直接回覆長篇大論。\n" +
