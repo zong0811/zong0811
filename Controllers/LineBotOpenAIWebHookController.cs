@@ -21,7 +21,7 @@ namespace isRock.Template
     try
     {
         using var client = new HttpClient();
-        // Render 免費版建議使用 1.5-flash，反應速度最穩定
+        // 建議在 Render 免費版維持使用 1.5-flash，速度與穩定度平衡最佳
         string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GeminiKey}";
         string currentTimeInfo = DateTime.UtcNow.AddHours(8).ToString("yyyy/MM/dd dddd HH:mm");
 
@@ -54,7 +54,7 @@ namespace isRock.Template
                              "【語氣要求】：文字溫潤、專業且精準。善用 Markdown 排版。";
 
 
-        // 4. 第一階段請求
+        // 4. 第一階段 AI 請求
         var firstBody = new {
             contents = new List<object>(historyList) { new { role = "user", parts = new[] { new { text = userQuery } } } },
             systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
@@ -74,14 +74,14 @@ namespace isRock.Template
         string cachedContent = ""; 
         string cachedTitle = "";
 
-        // 🌟 5. 並行任務處理 (關鍵修正：Task.Run<dynamic>)
+        // 🌟 5. 並行任務處理 (關鍵修正：明確指定 Task<dynamic>)
         var gasTasks = new List<Task<dynamic>>();
 
         foreach (var p in parts) {
             if (p.functionCall != null) {
                 hasFunctionCall = true;
                 var currentP = p; 
-                // 這裡明確指定 Task.Run 的回傳值為 dynamic
+                // 🌟 使用 Task.Run<dynamic> 解決 CS1503 錯誤
                 gasTasks.Add(Task.Run<dynamic>(async () => {
                     string fName = (string)currentP.functionCall.name;
                     var fArgs = currentP.functionCall.args;
@@ -118,7 +118,7 @@ namespace isRock.Template
             finalContents.Add(new { role = "user", parts = new[] { new { text = userQuery } } });
             finalContents.Add(new { role = "model", parts = modelParts });
             finalContents.AddRange(functionResponses);
-            finalContents.Add(new { role = "user", parts = new[] { new { text = "請依照格式詳細彙報剛才處理的內容並整理資訊。" } } });
+            finalContents.Add(new { role = "user", parts = new[] { new { text = "請依照格式詳細彙報剛才處理的內容。" } } });
 
             var finalRes = await client.PostAsync(url, new StringContent(JsonConvert.SerializeObject(new { 
                 contents = finalContents, systemInstruction = new { parts = new[] { new { text = systemPrompt } } }, 
@@ -128,25 +128,44 @@ namespace isRock.Template
             dynamic? finalJson = JsonConvert.DeserializeObject(await finalRes.Content.ReadAsStringAsync());
             string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
 
+            // 🌟 智慧型備援：如果 AI 斷片（空回覆），我們手動格式化資料顯示給老師
             return string.IsNullOrEmpty(aiText) ? FormatFallbackResponse(modelParts, functionResponses, cachedTitle, cachedContent) : aiText;
         }
 
-        return (string?)parts[0]?.text ?? "導師正在思考中...";
+        return (string?)parts[0]?.text ?? "導師正在準備中...";
     }
     catch (Exception ex) { return $"系統異常：{ex.Message}"; }
 
-    // --- 內部輔助函數 ---
+    // --- 內部輔助函數 (修正資料呈現邏輯) ---
     string FormatFallbackResponse(List<object> mps, List<object> frs, string ct, string cc) {
         StringBuilder sb = new StringBuilder();
         if (!string.IsNullOrEmpty(cc)) sb.AppendLine($"### {ct}\n{cc}\n\n---");
-        sb.AppendLine("所有任務皆已處理完成。報告如下：");
+        sb.AppendLine("所有任務皆已並行處理完成。報告如下：");
         for (int i = 0; i < mps.Count; i++) {
             dynamic m = mps[i]; 
             if (m.functionCall != null) {
                 string fName = (string)m.functionCall.name;
-                sb.AppendLine($"✅ 已執行動作：{fName}");
+                var rawData = ((dynamic)frs[i]).parts[0].functionResponse.response;
+                string json = JsonConvert.SerializeObject(rawData);
+
+                if (fName == "calendar_list") {
+                    var evts = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(json);
+                    sb.AppendLine("📅 **本週行程清單：**");
+                    if (evts?.Count > 0) foreach(var e in evts) sb.AppendLine($"• {e["start"]} - {e["summary"]}");
+                    else sb.AppendLine("（目前尚無行程）");
+                }
+                else if (fName == "drive_search") {
+                    var fls = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(json);
+                    sb.AppendLine("📁 **雲端搜尋結果：**");
+                    if (fls?.Count > 0) foreach(var f in fls) sb.AppendLine($"• [{f["name"]}]({f["url"]})");
+                    else sb.AppendLine("（找不到檔案）");
+                }
+                else {
+                    sb.AppendLine($"✅ 已執行動作：{fName}");
+                }
             }
         }
+        sb.AppendLine("\n對於這些資料，您還有需要我進一步分析的地方嗎？");
         return sb.ToString();
     }
 }
