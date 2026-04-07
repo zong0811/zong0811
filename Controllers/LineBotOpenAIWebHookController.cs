@@ -116,20 +116,45 @@ namespace isRock.Template
             string? aiText = (string?)finalJson?.candidates?[0]?.content?.parts?[0]?.text;
 
             // 🌟 智慧型備援：如果 AI 真的不說話，我們自己根據緩存的內容來排版
-            if (string.IsNullOrEmpty(aiText)) {
-                StringBuilder sb = new StringBuilder();
-                if (!string.IsNullOrEmpty(cachedContent)) {
-                    sb.AppendLine($"### {cachedTitle}");
-                    sb.AppendLine(cachedContent); // 顯示 AI 剛剛存進去的詳細內容
-                    sb.AppendLine("\n---");
-                }
-                sb.AppendLine("宗志老師，所有任務皆已處理完成。報告如下：");
-                foreach(dynamic mp in modelParts) {
-                    sb.AppendLine($"✅ 已執行動作：{mp.functionCall.name}");
-                }
-                sb.AppendLine("\n以上內容已存檔。對於這些資料，您還有需要我進一步分析的地方嗎？");
-                return sb.ToString();
-            }
+            if (string.IsNullOrEmpty(aiText)) 
+{
+    StringBuilder sb = new StringBuilder();
+    sb.AppendLine("這是從系統提取的詳細資料：\n");
+
+    // 這裡我們需要從之前的 functionResponses 中提取資料
+    // 為了方便，我們改在 foreach 執行時順便存下結果
+    for (int i = 0; i < modelParts.Count; i++) 
+    {
+        dynamic mp = modelParts[i];
+        string funcName = (string)mp.functionCall.name;
+        
+        // 取得對應的 GAS 回傳結果 (從剛才儲存的 functionResponses 找)
+        var fRes = (dynamic)functionResponses[i];
+        var rawData = fRes.parts[0].functionResponse.response;
+        string dataJson = JsonConvert.SerializeObject(rawData);
+
+        if (funcName == "calendar_list") {
+            var events = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(dataJson);
+            sb.AppendLine("📅 **本週行程清單：**");
+            if (events?.Count > 0)
+                foreach(var e in events) sb.AppendLine($"• {e["start"]} - {e["summary"]}");
+            else sb.AppendLine("（目前沒有安排行程）");
+        }
+        else if (funcName == "drive_search") {
+            var files = JsonConvert.DeserializeObject<List<Dictionary<string, string>>>(dataJson);
+            sb.AppendLine("📁 **雲端檔案搜尋結果：**");
+            if (files?.Count > 0)
+                foreach(var f in files) sb.AppendLine($"• [{f["name"]}]({f["url"]})");
+            else sb.AppendLine("（找不到相關檔案）");
+        }
+        else {
+            sb.AppendLine($"✅ 已執行動作：{funcName}");
+        }
+        sb.AppendLine();
+    }
+    sb.AppendLine("以上內容已為您整理完成。");
+    return sb.ToString();
+}
             return aiText;
         }
 
