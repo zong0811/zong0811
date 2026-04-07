@@ -31,7 +31,7 @@ namespace isRock.Template
             new { function_declarations = new object[] { 
                 new { name = "drive_search", description = "搜尋 Google Drive 檔案", parameters = new { type = "object", properties = new { query = new { type = "string" } }, required = new[] { "query" } } },
                 new { name = "calendar_list", description = "查詢接下來一週的行程" },
-                new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new { summary = new { type = "string" }, startTime = new { type = "string" }, endTime = new { type = "string" } }, required = new[] { "summary", "startTime", "endTime" } } },
+                new { name = "calendar_add", description = "在日曆中新增行程", parameters = new { type = "object", properties = new {summary = new { type = "string", description = "活動名稱" },startTime = new { type = "string", description = "ISO格式且務必包含時區偏移，例如: 2026-04-07T16:00:00+08:00" },endTime = new { type = "string", description = "ISO格式且務必包含時區偏移，例如:2026-04-07T17:00:00+08:00" }}, required = new[] { "summary", "startTime", "endTime" } } },
                 new { name = "gmail_send", description = "寄出電子郵件", parameters = new { type = "object", properties = new { recipient = new { type = "string" }, subject = new { type = "string" }, body = new { type = "string" } }, required = new[] { "recipient", "subject", "body" } } },
                 new { name = "add_lesson_note", description = "記錄教學發現、教案筆記或整理好的政策內容。只要涉及資料歸檔必用。", parameters = new { type = "object", properties = new { category = new { type = "string" }, title = new { type = "string" }, content = new { type = "string" } }, required = new[] { "category", "title", "content" } } }
             } }
