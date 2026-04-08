@@ -184,10 +184,39 @@ namespace isRock.Template
         }
     }
 
+// --- 4.5 自動喚醒服務 (Self-Ping) ---
+    public static class SelfPingService
+    {
+        private static readonly HttpClient client = new HttpClient();
+        public static void Start()
+        {
+            _ = Task.Run(async () =>
+            {
+                // 等待 5 秒讓系統完全啟動
+                await Task.Delay(5000); 
+                while (true)
+                {
+                    try
+                    {
+                        // 這是你的 Render 網址
+                        var response = await client.GetAsync("https://zong0811.onrender.com/api/LineBotOpenAIWebHook");
+                        Console.WriteLine($"[Self-Ping] Status: {response.StatusCode} at {DateTime.Now}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Self-Ping] Error: {ex.Message}");
+                    }
+                    await Task.Delay(TimeSpan.FromMinutes(10)); 
+                }
+            });
+        }
+    }
+
+    
     public class LineBotOpenAIWebHookController : isRock.LineBot.LineWebHookControllerBase
     {
         [HttpHead] [HttpGet] [Route("api/LineBotOpenAIWebHook")]
-        public IActionResult Get() => Ok("AI Google助手已經設定完成");
+        public IActionResult Get() => Ok("AI Google助手已經設定完成，加入自我喚醒功能");
 
         [HttpPost] [Route("api/LineBotOpenAIWebHook")]
         public async Task<IActionResult> POST()
