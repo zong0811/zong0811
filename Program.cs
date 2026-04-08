@@ -14,6 +14,9 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+// --- 重要：啟動背景自動喚醒任務 (防睡心跳) ---
+isRock.Template.SelfPingService.Start();
+
 app.UseHttpsRedirection();
 
 app.UseAuthorization();
